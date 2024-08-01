@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Livescript do
   use Mix.Task
 
-  def run([exs_path]) do
+  def run([exs_path | _]) do
     qualified_exs_path = Path.absname(exs_path) |> Path.expand()
 
     Logger.put_module_level(Livescript, :info)
@@ -44,7 +44,18 @@ defmodule Livescript do
     with {:ok, %{mtime: mtime}} <- File.stat(file_path),
          {:ok, current_code} <- File.read(file_path),
          {:ok, {_, _, current_exprs}} <- Code.string_to_quoted(current_code) do
+      current_argv = System.argv() |> Enum.drop(2)
+
+      # Preamble to make argv the same as when the file is run with elixir without livescript
+      {_, _, set_argv_expr} =
+        quote do
+          System.argv(unquote(current_argv))
+          IEx.dont_display_result()
+        end
+
+      execute_code(set_argv_expr)
       executed_exprs = execute_code(current_exprs)
+
       {:noreply, %{state | executed_exprs: executed_exprs, last_modified: mtime}}
     else
       {:error, reason} ->
