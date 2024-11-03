@@ -82,7 +82,7 @@ is_livescript = !!System.get_env("__LIVESCRIPT__")
 - [x] Last expr should print inspect of the result
 - [x] Gracefully handle compilation / syntax errors
 - [ ] Print a spinner or something in IEx to denote that it's running
-- [ ] Stacktraces should have correct line numbers (this may be trickier than I'd like...)
+- [x] Stacktraces should have correct line numbers (this may be trickier than I'd like...)
 - [ ] checkpoint bindings, rewind to bindings to diff point
 - [ ] code.purge any module definitions that were changed so we can avoid the redefinition warning
 - [ ] Verify that it handles that weird edge case when there's only one expr in the file , or zero

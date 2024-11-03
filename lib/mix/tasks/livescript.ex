@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Livescript do
     Task.async(fn ->
       preamble_exprs = Livescript.preamble_code(qualified_exs_path)
       Livescript.execute_code(preamble_exprs)
-      {:ok, {_, _, exprs}} = Code.string_to_quoted(code)
+      {:ok, {_, _, exprs}} = Livescript.to_quoted(code)
       executed_exprs = Livescript.execute_code(exprs)
 
       if executed_exprs == exprs do
@@ -62,7 +62,7 @@ defmodule Livescript do
     # first poll, run the code completely
     with {:ok, %{mtime: mtime}} <- File.stat(file_path),
          {:ok, current_code} <- File.read(file_path),
-         {:ok, {_, _, current_exprs}} <- Code.string_to_quoted(current_code) do
+         {:ok, {_, _, current_exprs}} <- to_quoted(current_code) do
       # Preamble to make argv the same as when the file is run with elixir without livescript
       set_argv_expr = preamble_code(file_path)
 
@@ -102,7 +102,7 @@ defmodule Livescript do
 
           next_code = File.read!(file_path)
 
-          case Code.string_to_quoted(next_code) do
+          case to_quoted(next_code) do
             {:ok, {_, _, next_exprs}} ->
               {common_exprs, _rest_exprs, rest_next_exprs} =
                 split_at_diff(state.executed_exprs, next_exprs)
@@ -165,8 +165,18 @@ defmodule Livescript do
     end
   end
 
+  def to_quoted(code) do
+    opts = [
+      literal_encoder: &{:ok, {:__block__, &2, [&1]}},
+      token_metadata: true,
+      unescape: false
+    ]
+
+    Code.string_to_quoted(code, opts)
+  end
+
   def execute_code(code) when is_binary(code) do
-    {:ok, {_, _, exprs}} = Code.string_to_quoted(code)
+    {:ok, {_, _, exprs}} = to_quoted(code)
     execute_code(exprs)
   end
 
@@ -188,8 +198,21 @@ defmodule Livescript do
           )
         end
 
+      code_str =
+        expr
+        |> Code.quoted_to_algebra()
+        |> Inspect.Algebra.format(:infinity)
+        |> IO.iodata_to_binary()
+
+      start_line =
+        expr
+        |> then(fn {_, opts, _} -> opts end)
+        |> Keyword.get(:line, 1)
+
+      newlines = String.duplicate("\n", start_line - 1)
+
       code = """
-      livescript_result__ = (#{Macro.to_string(expr)})
+      livescript_result__ = (#{newlines}#{code_str})
       #{Macro.to_string(callhome_expr)}
       #{if is_last, do: "livescript_result__", else: "IEx.dont_display_result()"}
       """
