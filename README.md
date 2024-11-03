@@ -34,14 +34,31 @@ Enjoy!
 
 ## Installation
 
-```
+```bash
 mix archive.install github thmsmlr/livescript
 ```
 
 ## Usage
 
-```
+```bash
 iex -S mix livescript my_script.exs
+```
+
+There are special variables that get set in the environment when running through Livescript.
+
+- `__LIVESCRIPT__` - Set to "1" when running through Livescript.
+- `__LIVESCRIPT_FILE__` - The path of the file being executed, equivalent to `__ENV__.file` which isn't set when running through IEX.
+
+You can check for the existence of these variables to customize what your script does when running through livescript, versus just regular.
+For instance, a somewhat common thing you'll want to do is to do file base operations relative to the directory of the script, not the current working directory.
+
+```elixir
+:ok = 
+  System.get_env("__LIVESCRIPT_FILE__", __ENV__.file)
+    |> Path.dirname()
+    |> File.cd()
+
+is_livescript = !!System.get_env("__LIVESCRIPT__")
 ```
 
 ## Someday maybe?
@@ -49,6 +66,8 @@ iex -S mix livescript my_script.exs
 - [ ] elixir-ls [support for Mix.install](https://github.com/elixir-lsp/elixir-ls/issues/654)
 - [ ] does Mix.install require special handling?
 - [ ] inconvenient that you cannot [import top-level a module](https://github.com/elixir-lang/elixir/pull/10674#issuecomment-782057780) defined in the same file, would be nice to find a fix.
+- [ ] `iex -S mix livescript run my_script.exs` which runs line by line via IEX, then exits. 
+  - This gets around the aforementioned issue with importing modules defined in the same file.
 - [ ] Do the fancy diff tracking from Livebook instead of just rerunning all exprs after first change
   - FWIW, given the lightweight nature of the scripts i've been writing, this hasn't been a big issue
 

@@ -1,6 +1,25 @@
 defmodule Mix.Tasks.Livescript do
   use Mix.Task
 
+  def run(["run", exs_path | _]) do
+    qualified_exs_path = Path.absname(exs_path) |> Path.expand()
+    Logger.put_module_level(Livescript, :info)
+    code = File.read!(qualified_exs_path)
+
+    Task.async(fn ->
+      preamble_exprs = Livescript.preamble_code(qualified_exs_path)
+      Livescript.execute_code(preamble_exprs)
+      {:ok, {_, _, exprs}} = Code.string_to_quoted(code)
+      executed_exprs = Livescript.execute_code(exprs)
+
+      if executed_exprs == exprs do
+        System.halt(0)
+      else
+        System.halt(1)
+      end
+    end)
+  end
+
   def run([exs_path | _]) do
     qualified_exs_path = Path.absname(exs_path) |> Path.expand()
 
@@ -44,14 +63,8 @@ defmodule Livescript do
     with {:ok, %{mtime: mtime}} <- File.stat(file_path),
          {:ok, current_code} <- File.read(file_path),
          {:ok, {_, _, current_exprs}} <- Code.string_to_quoted(current_code) do
-      current_argv = System.argv() |> Enum.drop(2)
-
       # Preamble to make argv the same as when the file is run with elixir without livescript
-      {_, _, set_argv_expr} =
-        quote do
-          System.argv(unquote(current_argv))
-          IEx.dont_display_result()
-        end
+      set_argv_expr = preamble_code(file_path)
 
       execute_code(set_argv_expr)
       executed_exprs = execute_code(current_exprs)
@@ -132,7 +145,32 @@ defmodule Livescript do
 
   # Helper functions
 
-  defp execute_code(exprs) when is_list(exprs) do
+  def preamble_code(file_path) do
+    {_, _, preamble_expr} =
+      quote do
+        System.put_env("__LIVESCRIPT__", "1")
+        System.put_env("__LIVESCRIPT_FILE__", unquote(file_path))
+        System.argv(unquote(current_argv()))
+        IEx.dont_display_result()
+      end
+
+    preamble_expr
+  end
+
+  defp current_argv() do
+    case System.argv() do
+      ["livescript", "run", _path | argv] -> argv
+      ["livescript", _path | argv] -> argv
+      argv -> argv
+    end
+  end
+
+  def execute_code(code) when is_binary(code) do
+    {:ok, {_, _, exprs}} = Code.string_to_quoted(code)
+    execute_code(exprs)
+  end
+
+  def execute_code(exprs) when is_list(exprs) do
     {iex_evaluator, iex_server} = find_iex()
 
     num_exprs = length(exprs)
@@ -166,7 +204,7 @@ defmodule Livescript do
           false
       end
     end)
-    |> Enum.map(fn {result, _} -> result end)
+    |> Enum.map(fn {expr, _} -> expr end)
   end
 
   defp schedule_poll do
