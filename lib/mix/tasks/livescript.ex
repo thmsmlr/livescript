@@ -166,13 +166,7 @@ defmodule Livescript do
   end
 
   def to_quoted(code) do
-    opts = [
-      literal_encoder: &{:ok, {:__block__, &2, [&1]}},
-      token_metadata: true,
-      unescape: false
-    ]
-
-    Code.string_to_quoted(code, opts)
+    Code.string_to_quoted(code)
   end
 
   def call_home_macro(expr) do
@@ -199,19 +193,15 @@ defmodule Livescript do
     |> Enum.take_while(fn {expr, index} ->
       is_last = index == num_exprs - 1
 
-      code_str =
-        expr
-        |> Code.quoted_to_algebra()
-        |> Inspect.Algebra.format(:infinity)
-        |> IO.iodata_to_binary()
-
-      start_line =
-        expr
-        |> then(fn {_, opts, _} -> opts end)
-        |> Keyword.get(:line, 1)
+      code_str = expr |> Macro.to_string()
+      {_, opts, _} = expr
+      start_line = Keyword.get(opts, :line, 1)
 
       code =
         case expr do
+          {:use, _, _} ->
+            code_str
+
           {:import, _, _} ->
             code_str
 
@@ -220,10 +210,9 @@ defmodule Livescript do
 
           {_, _, _} ->
             """
-            {livescript_result__, livescript_binding__, livescript_binding_keys__} = try do: (livescript_result__ = (#{code_str})
+            {livescript_result__, livescript_binding__} = try do: (livescript_result__ = (#{code_str})
               livescript_binding__ = binding() |> Keyword.filter(fn {k, _} -> k not in [:livescript_binding__, :livescript_result__] end)
-              livescript_binding_keys__ = livescript_binding__ |> Keyword.keys()
-              {livescript_result__, livescript_binding__, livescript_binding_keys__}
+              {livescript_result__, livescript_binding__}
             ), rescue: (
               e ->
                 #{Macro.to_string(call_home_macro(:__livescript_error__))}
@@ -232,62 +221,74 @@ defmodule Livescript do
             """
         end
 
-      code =
-        """
-        #{code}
-        #{Macro.to_string(call_home_macro(:__livescript_complete__))}
-        IEx.dont_display_result()
-        """
+      do_execute_code(code,
+        start_line: start_line,
+        async: true,
+        call_home_with: :__livescript_complete__
+      )
 
-      send(iex_evaluator, {:eval, iex_server, code, start_line, ""})
+      was_successful =
+        receive do
+          :__livescript_complete__ -> true
+          :__livescript_error__ -> false
+        end
 
-      receive do
-        :__livescript_complete__ ->
-          # Get the binding from the try scope
-          code = """
-          #{Macro.to_string(call_home_macro(quote do: Keyword.keys(livescript_binding__)))}
-          IEx.dont_display_result()
-          """
+      if was_successful do
+        # Fetch the bindings from the try scope
+        do_execute_code(call_home_macro(quote do: Keyword.keys(livescript_binding__)))
+        binding_keys = receive do: (x -> x)
 
-          send(iex_evaluator, {:eval, iex_server, code, start_line, ""})
+        # Set them into the parent scope
+        binding_keys
+        |> Enum.each(fn k ->
+          kvar = Macro.var(k, nil)
+          do_execute_code(quote do: unquote(kvar) = livescript_binding__[unquote(k)])
+        end)
 
-          binding_keys =
-            receive do
-              x -> x
-            end
+        if is_last do
+          do_execute_code("", print_result: "livescript_result__")
+        end
 
-          # Set them into the parent scope
-          binding_keys
-          |> Enum.each(fn k ->
-            kvar = Macro.var(k, nil)
-
-            code =
-              quote do
-                unquote(kvar) = livescript_binding__[unquote(k)]
-                IEx.dont_display_result()
-              end
-              |> Macro.to_string()
-
-            send(iex_evaluator, {:eval, iex_server, code, 1, ""})
-          end)
-
-          code = """
-          #{Macro.to_string(call_home_macro(:__livescript_complete__))}
-          #{if is_last, do: "livescript_result__", else: "IEx.dont_display_result()"}
-          """
-
-          send(iex_evaluator, {:eval, iex_server, code, 1, ""})
-
-          receive do
-            :__livescript_complete__ ->
-              true
-          end
-
-        :__livescript_error__ ->
-          false
+        true
+      else
+        false
       end
     end)
     |> Enum.map(fn {expr, _} -> expr end)
+  end
+
+  defp do_execute_code(code, opts \\ [])
+
+  defp do_execute_code(code, opts) when is_binary(code) do
+    {iex_evaluator, iex_server} = find_iex()
+    print_result = Keyword.get(opts, :print_result, "IEx.dont_display_result()")
+    call_home_with = Keyword.get(opts, :call_home_with, :__livescript_complete__)
+    start_line = Keyword.get(opts, :start_line, 1)
+    async = Keyword.get(opts, :async, false)
+
+    call_home_expr =
+      case call_home_with do
+        nil -> nil
+        expr -> Macro.to_string(call_home_macro(expr))
+      end
+
+    code = """
+    #{code}
+    #{call_home_expr}
+    #{print_result}
+    """
+
+    send(iex_evaluator, {:eval, iex_server, code, start_line, ""})
+
+    if not async and is_atom(call_home_with) do
+      receive do
+        ^call_home_with -> true
+      end
+    end
+  end
+
+  defp do_execute_code(exprs, opts) do
+    do_execute_code(Macro.to_string(exprs), opts)
   end
 
   defp schedule_poll do
