@@ -12,11 +12,14 @@ defmodule Mix.Tasks.Livescript do
       {:ok, {_, _, exprs}} = Livescript.to_quoted(code)
       executed_exprs = Livescript.execute_code(exprs)
 
-      if executed_exprs == exprs do
-        System.halt(0)
-      else
-        System.halt(1)
+      exit_status = if executed_exprs == exprs, do: 0, else: 1
+      hooks = :elixir_config.get_and_put(:at_exit, [])
+
+      for hook <- hooks do
+        hook.(exit_status)
       end
+
+      System.halt(exit_status)
     end)
   end
 
@@ -184,8 +187,6 @@ defmodule Livescript do
   end
 
   def execute_code(exprs) when is_list(exprs) do
-    {iex_evaluator, iex_server} = find_iex()
-
     num_exprs = length(exprs)
 
     exprs
