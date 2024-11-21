@@ -1,0 +1,67 @@
+{
+	"name": "livescript-extension",
+	"description": "Livescript extension for VS Code",
+	"version": "0.0.1",
+	"publisher": "thmsmlr",
+	"repository": "https://github.com/thmsmlr/livescript",
+	"engines": {
+		"vscode": "^1.74.0"
+	},
+	"activationEvents": [
+		"onLanguage:elixir",
+		"workspaceContains:**/*.exs"
+	],
+	"main": "./extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "extension.livescript.run_at_cursor",
+				"title": "LiveScript: Run Expression At Cursor"
+			},
+			{
+				"command": "extension.livescript.run_after_cursor",
+				"title": "LiveScript: Run Expressions After Cursor"
+			}
+		],
+		"languages": [
+			{
+				"id": "elixir",
+				"extensions": [
+					".ex",
+					".exs"
+				],
+				"aliases": [
+					"Elixir"
+				]
+			}
+		],
+		"keybindings": [
+			{
+				"command": "extension.livescript.run_at_cursor",
+				"args": {
+					"moveCursorToNextExpression": false
+				},
+				"key": "ctrl+enter",
+				"when": "editorTextFocus && editorLangId == 'elixir'"
+			},
+			{
+				"command": "extension.livescript.run_at_cursor",
+				"args": {
+					"moveCursorToNextExpression": true
+				},
+				"key": "shift+enter",
+				"when": "editorTextFocus && editorLangId == 'elixir'"
+			},
+			{
+				"command": "extension.livescript.run_after_cursor",
+				"args": {},
+				"key": "ctrl+shift+enter",
+				"when": "editorTextFocus && editorLangId == 'elixir'"
+			}
+		]
+	},
+	"scripts": {},
+	"devDependencies": {
+		"@types/vscode": "^1.73.0"
+	}
+}
