@@ -5,6 +5,14 @@ Livescript runs your .exs files in an iex shell, and reruns them on change.
 The key is that it doesn't rerun the whole file, only the parts that changed.
 Just like Livebook stale tracking, though admittedly simplified.
 
+
+<div style="text-align: center;">
+  <a href="https://x.com/thmsmlr/status/1816886371312697496">
+    <img src="./assets/livescript-video.png" alt="Livescript">
+  </a>
+</div>
+
+
 ## Why?
 
 This is incredibly useful for a fast feedback loop when your scripts have heavy setup.

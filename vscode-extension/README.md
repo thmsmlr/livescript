@@ -4,7 +4,7 @@ A Visual Studio Code extension that enables live execution of Elixir scripts wit
 This extension allows you to run Elixir code blocks interactively within your editor, making development and experimentation more efficient.
 For more information about LiveScript, see the [LiveScript README](https://github.com/thmsmlr/livescript).
 
-![LiveScript in action](./assets/livescript-vscode.png)
+![LiveScript in action](https://github.com/thmsmlr/livescript/raw/main/vscode-extension/assets/livescript-vscode.png)
 
 ## Features
 
@@ -31,7 +31,7 @@ For more information about LiveScript, see the [LiveScript README](https://githu
 2. Click the "⚡ Start LiveScript Server" CodeLens at the top of the file
    - Or use the command palette: `LiveScript: Start Server`
 
-![Start Server](./assets/livescript-vscode-launch.png)
+![Start Server](https://github.com/thmsmlr/livescript/raw/main/vscode-extension/assets/livescript-vscode-launch.png)
 
 ### Executing Code
 

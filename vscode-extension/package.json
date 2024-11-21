@@ -1,6 +1,7 @@
 {
-	"name": "livescript",
-	"description": "LiveScript extension for VS Code",
+	"name": "livescript-elixir",
+	"displayName": "Livescript",
+	"description": "Livescript extension for VS Code",
 	"icon": "assets/icon.png",
 	"version": "0.0.1",
 	"publisher": "thmsmlr",
