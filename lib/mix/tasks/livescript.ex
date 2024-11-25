@@ -440,11 +440,11 @@ defmodule Livescript do
       exprs =
         Enum.zip(quoted, precise_quoted)
         |> Enum.map(fn {quoted, precise_quoted} ->
-          opts = precise_quoted |> elem(1)
-          line_start = opts[:line]
+          {line_start, line_end} = line_range(precise_quoted)
 
-          line_end =
-            opts[:end_of_expression][:line] || opts[:last][:line] || opts[:closing][:line]
+          IO.inspect(precise_quoted, label: "precise_quoted")
+          IO.inspect(line_start, label: "line_start")
+          IO.inspect(line_end, label: "line_end")
 
           code =
             code
@@ -463,6 +463,29 @@ defmodule Livescript do
       {:ok, exprs}
     end
   end
+
+  defp line_range({_, opts, nil}) do
+    line_start = opts[:line] || :infinity
+    line_end = opts[:end_of_expression][:line] || opts[:last][:line] || opts[:closing][:line] || 0
+    {line_start, line_end}
+  end
+
+  defp line_range({_, opts, children}) do
+    line_start = opts[:line] || :infinity
+    line_end = opts[:end_of_expression][:line] || opts[:last][:line] || opts[:closing][:line] || 0
+
+    {child_min, child_max} =
+      children
+      |> Enum.map(&line_range/1)
+      |> Enum.unzip()
+
+    {
+      Enum.min([line_start | child_min]),
+      Enum.max([line_end | child_max])
+    }
+  end
+
+  defp line_range(_), do: {:infinity, 0}
 end
 
 defmodule Livescript.TCP do
