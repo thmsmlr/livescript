@@ -442,10 +442,6 @@ defmodule Livescript do
         |> Enum.map(fn {quoted, precise_quoted} ->
           {line_start, line_end} = line_range(precise_quoted)
 
-          IO.inspect(precise_quoted, label: "precise_quoted")
-          IO.inspect(line_start, label: "line_start")
-          IO.inspect(line_end, label: "line_end")
-
           code =
             code
             |> String.split("\n")
