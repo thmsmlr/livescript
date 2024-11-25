@@ -24,11 +24,22 @@ defmodule Mix.Tasks.Livescript do
   end
 
   def run([exs_path | _]) do
-    qualified_exs_path = Path.absname(exs_path) |> Path.expand()
+    # This has to be async because otherwise Mix doesn't start the iex shell
+    # until this function returns
+    Task.async(fn ->
+      qualified_exs_path = Path.absname(exs_path) |> Path.expand()
+      Logger.put_module_level(Livescript, :info)
 
-    Logger.put_module_level(Livescript, :info)
-    Livescript.start_link(qualified_exs_path)
-    Livescript.TCP.start_link()
+      children = [
+        {Livescript, qualified_exs_path},
+        {Task.Supervisor, name: Livescript.TaskSupervisor},
+        {Task, fn -> Livescript.TCP.server() end}
+      ]
+
+      opts = [strategy: :one_for_one, name: Livescript.Supervisor]
+      {:ok, _} = Supervisor.start_link(children, opts)
+      Process.sleep(:infinity)
+    end)
   end
 end
 
@@ -485,14 +496,9 @@ defmodule Livescript do
 end
 
 defmodule Livescript.TCP do
-  use GenServer
   require Logger
 
-  def start_link(_opts \\ []) do
-    GenServer.start_link(__MODULE__, [], name: __MODULE__)
-  end
-
-  def init(_) do
+  def server() do
     file_path = :sys.get_state(Livescript).file_path
     port = find_available_port(13137..13237)
     port_file = get_port_file_path(file_path)
@@ -501,17 +507,14 @@ defmodule Livescript.TCP do
     File.mkdir_p!(Path.dirname(port_file))
     File.write!(port_file, "#{port}")
 
-    IO.puts(IO.ANSI.yellow() <> "Listening for commands on port #{port}" <> IO.ANSI.reset())
+    Process.register(self(), Livescript.TCP)
 
     {:ok, socket} =
       :gen_tcp.listen(port, [:binary, packet: :line, active: false, reuseaddr: true])
 
-    spawn_link(fn -> accept_connections(socket) end)
-    {:ok, %{port: port, port_file: port_file}}
-  end
+    IO.puts(IO.ANSI.yellow() <> "Listening for commands on port #{port}" <> IO.ANSI.reset())
 
-  def terminate(_reason, %{port_file: port_file}) do
-    if port_file, do: File.rm(port_file)
+    accept_connections(socket)
   end
 
   # Helper to find an available port
@@ -536,12 +539,16 @@ defmodule Livescript.TCP do
 
   defp accept_connections(socket) do
     {:ok, client} = :gen_tcp.accept(socket)
-    spawn_link(fn -> handle_client(client) end)
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(Livescript.TaskSupervisor, fn -> handle_client(client) end)
+
+    :gen_tcp.controlling_process(client, pid)
     accept_connections(socket)
   end
 
   defp handle_client(socket) do
-    with {:ok, data} <- :gen_tcp.recv(socket, 0),
+    with {:ok, data} <- receive_complete_message(socket, ""),
          {:ok, decoded} <- try_json_decode(data),
          response <- handle_command(decoded),
          {:ok, encoded_response} <- try_json_encode(response) do
@@ -555,11 +562,31 @@ defmodule Livescript.TCP do
     :gen_tcp.close(socket)
   end
 
+  # Recursively receive data until we get a complete message ending in newline
+  defp receive_complete_message(socket, acc) do
+    case :gen_tcp.recv(socket, 0) do
+      {:ok, data} ->
+        new_acc = acc <> data
+
+        if String.ends_with?(new_acc, "\n") do
+          {:ok, String.trim(new_acc)}
+        else
+          receive_complete_message(socket, new_acc)
+        end
+
+      {:error, :closed} ->
+        {:ok, acc}
+
+      {:error, reason} ->
+        {:error, "Error receiving data: #{inspect(reason)}"}
+    end
+  end
+
   defp try_json_decode(data) do
     try do
       {:ok, data |> :json.decode()}
     rescue
-      _ -> {:error, "Unable to decode JSON: #{inspect(data)}"}
+      error -> {:error, "Unable to decode JSON: #{inspect(error)} on data: #{inspect(data)}"}
     end
   end
 
@@ -567,7 +594,7 @@ defmodule Livescript.TCP do
     try do
       {:ok, data |> :json.encode()}
     rescue
-      _ -> {:error, "Unable to encode JSON: #{inspect(data)}"}
+      error -> {:error, "Unable to encode JSON: #{inspect(error)} on data: #{inspect(data)}"}
     end
   end
 
