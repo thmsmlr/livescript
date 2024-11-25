@@ -230,29 +230,6 @@ defmodule Livescript do
   end
 
   # Helper functions
-  @doc """
-  Get the line range of an expression.
-  """
-  def line_range({_, opts, nil}) do
-    {Keyword.get(opts, :line, :infinity), Keyword.get(opts, :line, 0)}
-  end
-
-  def line_range({_, opts, children}) do
-    min_line = Keyword.get(opts, :line, :infinity)
-    max_line = Keyword.get(opts, :line, 0)
-
-    {child_min, child_max} =
-      children
-      |> Enum.map(&line_range/1)
-      |> Enum.unzip()
-
-    {
-      Enum.min([min_line | child_min]),
-      Enum.max([max_line | child_max])
-    }
-  end
-
-  def line_range(_), do: {:infinity, 0}
 
   def preamble_code(file_path) do
     code =
@@ -463,19 +440,23 @@ defmodule Livescript do
       exprs =
         Enum.zip(quoted, precise_quoted)
         |> Enum.map(fn {quoted, precise_quoted} ->
-          {min_line, max_line} = line_range(precise_quoted)
+          opts = precise_quoted |> elem(1)
+          line_start = opts[:line]
+
+          line_end =
+            opts[:end_of_expression][:line] || opts[:last][:line] || opts[:closing][:line]
 
           code =
             code
             |> String.split("\n")
-            |> Enum.slice(min_line - 1, max_line - min_line + 1)
+            |> Enum.slice(line_start - 1, line_end - line_start + 1)
             |> Enum.join("\n")
 
           %Livescript.Expression{
             quoted: quoted,
             code: code,
-            line_start: min_line,
-            line_end: max_line
+            line_start: line_start,
+            line_end: line_end
           }
         end)
 
@@ -521,7 +502,9 @@ defmodule Livescript.TCP do
         {:ok, socket} ->
           :gen_tcp.close(socket)
           true
-        {:error, _} -> false
+
+        {:error, _} ->
+          false
       end
     end) || raise "No available ports in range #{inspect(port_range)}"
   end
@@ -595,27 +578,16 @@ defmodule Livescript.TCP do
   end
 
   defp handle_command(%{"command" => "parse_code", "code" => code}) do
-    opts = [
-      literal_encoder: &{:ok, {:__block__, &2, [&1]}},
-      token_metadata: true,
-      unescape: false
-    ]
-
-    case Code.string_to_quoted(code, opts) do
-      {:ok, {_, _, exprs}} ->
-        result =
-          exprs
-          |> Enum.map(fn expr ->
-            {min_line, max_line} = Livescript.line_range(expr)
-
-            %{
-              expr: Macro.to_string(expr),
-              line_start: min_line,
-              line_end: max_line
-            }
-          end)
-
-        result
+    case Livescript.parse_code(code) do
+      {:ok, exprs} ->
+        exprs
+        |> Enum.map(fn expr ->
+          %{
+            expr: expr.code,
+            line_start: expr.line_start,
+            line_end: expr.line_end
+          }
+        end)
 
       {:error, _} ->
         nil
