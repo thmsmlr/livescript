@@ -7,20 +7,6 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 
-// Helper function to find the start of a paragraph
-function findParagraphStart(lines, currentLine) {
-	// Search backwards from current line to find start of paragraph
-	let paragraphStart = currentLine;
-	while (paragraphStart > 0) {
-		const line = lines[paragraphStart - 1].trim();
-		if (line.length === 0) {
-			break;
-		}
-		paragraphStart--;
-	}
-	return paragraphStart;
-}
-
 // Helper function to find the next expression after the current line
 function findNextExpression(expressions, currentLine) {
 	// Sort expressions by start line
@@ -171,14 +157,14 @@ function sendCommand(command, callback) {
 function sendCommandIfConnected(command, callback) {
 	const filepath = command.filepath || vscode.window.activeTextEditor?.document.fileName;
 	const provider = getCodeLensProvider();
-	
+
 	if (!filepath || !provider.activeConnections.get(filepath)) {
 		vscode.window.showErrorMessage('LiveScript server not connected. Please start the server first.');
 		if (callback) callback({ success: false, error: 'Not connected' });
 		return;
 	}
-	
-	sendCommand({...command, filepath}, callback);
+
+	sendCommand({ ...command, filepath }, callback);
 }
 
 // Helper to get provider instance
@@ -186,6 +172,36 @@ function getCodeLensProvider() {
 	// We'll need to store the provider instance somewhere accessible
 	// This could be in extension state or as a module-level variable
 	return global.livescriptProvider;
+}
+
+// Add this helper function at the top level
+function findOrCreateVerticalSplit() {
+	const activeEditor = vscode.window.activeTextEditor;
+	if (!activeEditor) return;
+
+	// Get all visible editors
+	const visibleEditors = vscode.window.visibleTextEditors;
+	console.log(`visibleEditors: ${visibleEditors}`);
+
+	// Check if we already have a vertical split
+	const hasVerticalSplit = visibleEditors.some(editor => {
+		return editor.viewColumn !== activeEditor.viewColumn &&
+			(editor.viewColumn === vscode.ViewColumn.One ||
+				editor.viewColumn === vscode.ViewColumn.Two);
+	});
+
+	console.log(`hasVerticalSplit: ${hasVerticalSplit}`);
+
+	// If we have a vertical split, find the empty column
+	if (hasVerticalSplit) {
+		return activeEditor.viewColumn === vscode.ViewColumn.One ?
+			vscode.ViewColumn.Two :
+			vscode.ViewColumn.One;
+	}
+
+	// If no split exists, create one in the second column
+	vscode.commands.executeCommand('workbench.action.splitEditor');
+	return vscode.ViewColumn.Two;
 }
 
 /**
@@ -201,10 +217,22 @@ function activate(context) {
 		'extension.livescript.start_server',
 		async (options) => {
 			const filepath = options.filepath;
-			const terminal = vscode.window.createTerminal('LiveScript');
+
+			// Determine the appropriate view column for the terminal
+			const targetColumn = findOrCreateVerticalSplit();
+			console.log(`Creating terminal in column ${targetColumn}`);
+
+			const terminal = vscode.window.createTerminal({
+				name: 'LiveScript',
+				location: {
+					preserveFocus: true,
+					viewColumn: targetColumn
+				}
+			});
+
 			terminal.sendText(`cd ~ && iex -S mix livescript ${filepath}`);
-			terminal.show();
-			
+			terminal.show(true);
+
 			// Wait a bit for server to start, then verify connection
 			await new Promise(resolve => setTimeout(resolve, 1000));
 			await codeLensProvider.verifyServerConnection(filepath);
@@ -226,9 +254,9 @@ function activate(context) {
 
 			const code = editor.document.getText();
 
-			sendCommandIfConnected({ 
-				command: 'run_at_cursor', 
-				code: code, 
+			sendCommandIfConnected({
+				command: 'run_at_cursor',
+				code: code,
 				line: line,
 				filepath: editor.document.fileName
 			}, () => {

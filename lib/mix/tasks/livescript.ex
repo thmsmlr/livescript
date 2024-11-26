@@ -197,16 +197,13 @@ defmodule Livescript do
           case parse_code(next_code) do
             {:ok, next_exprs} ->
               {common_exprs, _rest_exprs, _rest_next_exprs} =
-                split_at_diff(state.executed_exprs, Enum.map(next_exprs, & &1.quoted))
+                split_at_diff(
+                  Enum.map(state.executed_exprs, & &1.quoted),
+                  Enum.map(next_exprs, & &1.quoted)
+                )
 
-              # Logger.info("Executed exprs: #{Macro.to_string(state.executed_exprs)}")
-              # Logger.info("Common exprs: #{Macro.to_string(common_exprs)}")
-              # Logger.info("Next exprs: #{Macro.to_string(rest_next_exprs)}")
-
-              rest_next_exprs =
-                next_exprs
-                |> Enum.drop(length(common_exprs))
-
+              common_exprs = Enum.take(next_exprs, length(common_exprs))
+              rest_next_exprs = Enum.drop(next_exprs, length(common_exprs))
               executed_next_exprs = execute_code(rest_next_exprs)
 
               {:noreply,
@@ -344,7 +341,7 @@ defmodule Livescript do
         false
       end
     end)
-    |> Enum.map(fn {expr, _} -> expr.quoted end)
+    |> Enum.map(fn {expr, _} -> expr end)
   end
 
   defp do_execute_code(code, opts \\ [])
