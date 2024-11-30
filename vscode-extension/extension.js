@@ -74,7 +74,6 @@ class LiveScriptCodeLensProvider {
 			})];
 		}
 
-		// Rest of existing provideCodeLenses implementation...
 		return new Promise((resolve, reject) => {
 			const code = document.getText();
 
@@ -84,13 +83,20 @@ class LiveScriptCodeLensProvider {
 				code: code
 			}, (response) => {
 				if (!response.success) {
-					console.error("Failed to parse code:", response.error);
+					// Check if this is a parse error
+					if (response.error?.type === "parse_error") {
+						console.log("Code parse error - maintaining previous code lens state");
+						resolve(this.codeLenses);
+						return;
+					}
+					// For other errors, log and clear code lenses
+					console.error("Server error:", response.error);
 					resolve([]);
 					return;
 				}
 
-				this.codeLenses = [];
 				this.expressions = response.result;
+				this.codeLenses = [];
 
 				// Create a CodeLens for each expression
 				this.expressions.forEach(expr => {

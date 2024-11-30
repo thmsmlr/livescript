@@ -327,11 +327,12 @@ defmodule Livescript do
         Enum.zip(quoted, precise_quoted)
         |> Enum.map(fn {quoted, precise_quoted} ->
           {line_start, line_end} = line_range(precise_quoted)
+          amount_of_lines = max(line_end - line_start + 1, 0)
 
           code =
             code
             |> String.split("\n")
-            |> Enum.slice(line_start - 1, line_end - line_start + 1)
+            |> Enum.slice(line_start - 1, amount_of_lines)
             |> Enum.join("\n")
 
           %Livescript.Expression{
@@ -429,13 +430,19 @@ defmodule Livescript.TCP do
   defp handle_client(socket) do
     with {:ok, data} <- receive_complete_message(socket, ""),
          {:ok, decoded} <- try_json_decode(data),
-         response <- handle_command(decoded),
-         {:ok, encoded_response} <- try_json_encode(response) do
+         {:ok, result} <- handle_command(decoded),
+         {:ok, encoded_response} <- try_json_encode(result) do
       :gen_tcp.send(socket, "{\"success\": true, \"result\": #{encoded_response}}")
     else
-      {:error, x} ->
-        Logger.error("Error handling message: #{inspect(x)}")
-        :gen_tcp.send(socket, "{\"success\": false, \"error\": \"#{inspect(x)}\"}")
+      {:error, error} ->
+        encoded_error =
+          try do
+            :json.encode(error)
+          rescue
+            _ -> :json.encode(%{type: "internal_error", details: inspect(error)})
+          end
+
+        :gen_tcp.send(socket, "{\"success\": false, \"error\": #{encoded_error}}")
     end
 
     :gen_tcp.close(socket)
@@ -478,48 +485,67 @@ defmodule Livescript.TCP do
   end
 
   defp handle_command(%{"command" => "run_after_cursor", "code" => code, "line" => line}) do
-    Livescript.run_after_cursor(code, line)
+    case Livescript.run_after_cursor(code, line) do
+      :ok -> {:ok, true}
+      error -> error
+    end
   end
 
   defp handle_command(%{"command" => "run_after_cursor", "line" => line}) do
-    Livescript.run_after_cursor(line)
+    case Livescript.run_after_cursor(line) do
+      :ok -> {:ok, true}
+      error -> error
+    end
   end
 
   defp handle_command(%{"command" => "run_at_cursor", "code" => code, "line" => line}) do
-    Livescript.run_at_cursor(code, line)
+    case Livescript.run_at_cursor(code, line) do
+      :ok -> {:ok, true}
+      error -> error
+    end
   end
 
   defp handle_command(%{"command" => "run_at_cursor", "line" => line}) do
-    Livescript.run_at_cursor(line)
+    case Livescript.run_at_cursor(line) do
+      :ok -> {:ok, true}
+      error -> error
+    end
   end
 
   defp handle_command(%{"command" => "verify_connection", "filepath" => filepath}) do
     current_file = :sys.get_state(Livescript) |> Map.get(:file_path)
 
-    %{
-      "connected" => Path.expand(filepath) == Path.expand(current_file),
-      "current_file" => current_file
-    }
+    {:ok,
+     %{
+       "connected" => Path.expand(filepath) == Path.expand(current_file),
+       "current_file" => current_file
+     }}
   end
 
   defp handle_command(%{"command" => "parse_code", "code" => code}) do
     case Livescript.parse_code(code) do
       {:ok, exprs} ->
-        exprs
-        |> Enum.map(fn expr ->
-          %{
-            expr: expr.code,
-            line_start: expr.line_start,
-            line_end: expr.line_end
-          }
-        end)
+        {:ok,
+         exprs
+         |> Enum.map(fn expr ->
+           %{
+             expr: expr.code,
+             line_start: expr.line_start,
+             line_end: expr.line_end
+           }
+         end)}
 
-      {:error, _} ->
-        nil
+      {:error, error} ->
+        {:error,
+         %{
+           type: "parse_error",
+           details: inspect(error)
+         }}
     end
   end
 
   defp handle_command(command) do
     Logger.info("Received unknown command: #{inspect(command)}")
+    {:error, %{type: "unknown_command", details: "Command not recognized"}}
   end
 end
