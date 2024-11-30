@@ -7,6 +7,9 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 
+// Add at the top level with other constants
+let outputChannel;
+
 // Helper function to find the next expression after the current line
 function findNextExpression(expressions, currentLine) {
 	// Sort expressions by start line
@@ -145,6 +148,7 @@ function sendCommand(command, callback) {
 		});
 
 		client.on('error', (err) => {
+			log(`Socket error: ${err}`);
 			console.error("Socket error:", err);
 			if (callback) callback({ success: false, error: err.message });
 		});
@@ -181,7 +185,7 @@ function findOrCreateVerticalSplit() {
 
 	// Get all visible editors
 	const visibleEditors = vscode.window.visibleTextEditors;
-	console.log(`visibleEditors: ${visibleEditors}`);
+	log(`visibleEditors: ${visibleEditors}`);
 
 	// Check if we already have a vertical split
 	const hasVerticalSplit = visibleEditors.some(editor => {
@@ -190,7 +194,7 @@ function findOrCreateVerticalSplit() {
 				editor.viewColumn === vscode.ViewColumn.Two);
 	});
 
-	console.log(`hasVerticalSplit: ${hasVerticalSplit}`);
+	log(`hasVerticalSplit: ${hasVerticalSplit}`);
 
 	// If we have a vertical split, find the empty column
 	if (hasVerticalSplit) {
@@ -204,10 +208,21 @@ function findOrCreateVerticalSplit() {
 	return vscode.ViewColumn.Two;
 }
 
+// Add this helper function to use throughout your code
+function log(message) {
+	if (outputChannel) {
+		outputChannel.appendLine(message);
+	}
+}
+
 /**
  * @param {vscode.ExtensionContext} context
  */
 function activate(context) {
+	// Create output channel
+	outputChannel = vscode.window.createOutputChannel('LiveScript', 'livescript-output');
+	context.subscriptions.push(outputChannel);
+
 	// Create the CodeLens provider instance
 	const codeLensProvider = new LiveScriptCodeLensProvider();
 	global.livescriptProvider = codeLensProvider; // Store for access

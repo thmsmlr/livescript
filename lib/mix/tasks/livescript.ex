@@ -7,10 +7,17 @@ defmodule Mix.Tasks.Livescript do
     code = File.read!(qualified_exs_path)
 
     Task.async(fn ->
+      children = [
+        {Livescript.Executor, []}
+      ]
+
+      opts = [strategy: :one_for_one, name: Livescript.Supervisor]
+      {:ok, _} = Supervisor.start_link(children, opts)
+
       preamble_exprs = Livescript.preamble_code(qualified_exs_path)
-      Livescript.execute_code(preamble_exprs)
+      Livescript.Executor.execute(preamble_exprs)
       {:ok, exprs} = Livescript.parse_code(code)
-      executed_exprs = Livescript.execute_code(exprs)
+      executed_exprs = Livescript.Executor.execute(exprs)
 
       exit_status = if executed_exprs == exprs, do: 0, else: 1
       hooks = :elixir_config.get_and_put(:at_exit, [])
@@ -31,8 +38,9 @@ defmodule Mix.Tasks.Livescript do
       Logger.put_module_level(Livescript, :info)
 
       children = [
-        {Livescript, qualified_exs_path},
         {Task.Supervisor, name: Livescript.TaskSupervisor},
+        {Livescript.Executor, []},
+        {Livescript, qualified_exs_path},
         {Task, fn -> Livescript.TCP.server() end}
       ]
 
@@ -108,7 +116,7 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_call({:run_after_cursor, code, line_number}, _from, %{file_path: _file_path} = state) do
+  def handle_call({:run_after_cursor, code, line_number}, from, %{file_path: _file_path} = state) do
     with {:ok, exprs} <- parse_code(code) do
       exprs_after =
         exprs
@@ -117,8 +125,14 @@ defmodule Livescript do
         end)
 
       IO.puts(IO.ANSI.yellow() <> "Running code after line #{line_number}:" <> IO.ANSI.reset())
-      _executed_exprs = execute_code(exprs_after)
-      {:reply, :ok, state}
+
+      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        executed_exprs = Livescript.Executor.execute(exprs_after)
+        GenServer.reply(from, :ok)
+        {:done_executing, executed_exprs}
+      end)
+
+      {:noreply, state}
     else
       error ->
         {:reply, error, state}
@@ -132,7 +146,7 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_call({:run_at_cursor, code, line_number}, _from, %{file_path: _file_path} = state) do
+  def handle_call({:run_at_cursor, code, line_number}, from, %{file_path: _file_path} = state) do
     with {:ok, exprs} <- parse_code(code) do
       exprs_at =
         exprs
@@ -141,8 +155,14 @@ defmodule Livescript do
         end)
 
       IO.puts(IO.ANSI.yellow() <> "Running code at line #{line_number}:" <> IO.ANSI.reset())
-      _executed_exprs = execute_code(exprs_at)
-      {:reply, :ok, state}
+
+      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        executed_exprs = Livescript.Executor.execute(exprs_at)
+        GenServer.reply(from, :ok)
+        {:done_executing, executed_exprs}
+      end)
+
+      {:noreply, state}
     else
       error ->
         {:reply, error, state}
@@ -157,11 +177,14 @@ defmodule Livescript do
          {:ok, current_exprs} <- parse_code(current_code) do
       # Preamble to make argv the same as when the file is run with elixir without livescript
       preamble_code(file_path)
-      |> execute_code()
+      |> Livescript.Executor.execute()
 
-      executed_exprs = execute_code(current_exprs)
+      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        executed_exprs = Livescript.Executor.execute(current_exprs)
+        {:done_executing, executed_exprs, mtime}
+      end)
 
-      {:noreply, %{state | executed_exprs: executed_exprs, last_modified: mtime}}
+      {:noreply, %{state | last_modified: mtime}}
     else
       {:error, reason} ->
         IO.puts(
@@ -204,14 +227,13 @@ defmodule Livescript do
 
               common_exprs = Enum.take(next_exprs, length(common_exprs))
               rest_next_exprs = Enum.drop(next_exprs, length(common_exprs))
-              executed_next_exprs = execute_code(rest_next_exprs)
 
-              {:noreply,
-               %{
-                 state
-                 | executed_exprs: common_exprs ++ executed_next_exprs,
-                   last_modified: mtime
-               }}
+              Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+                executed_exprs = Livescript.Executor.execute(rest_next_exprs)
+                {:done_executing, common_exprs ++ executed_exprs, mtime}
+              end)
+
+              {:noreply, %{state | last_modified: mtime}}
 
             {:error, err} ->
               IO.puts(
@@ -235,6 +257,20 @@ defmodule Livescript do
       {:noreply, state}
   after
     schedule_poll()
+  end
+
+  @impl true
+  def handle_info({_ref, {:done_executing, exprs}}, state) do
+    {:noreply, %{state | executed_exprs: exprs}}
+  end
+
+  @impl true
+  def handle_info({_ref, {:done_executing, exprs, last_modified}}, state) do
+    {:noreply, %{state | executed_exprs: exprs, last_modified: last_modified}}
+  end
+
+  def handle_info({:DOWN, _ref, _, _, :normal}, state) do
+    {:noreply, state}
   end
 
   # Helper functions
@@ -261,127 +297,6 @@ defmodule Livescript do
     end
   end
 
-  def call_home_macro(expr) do
-    quote do
-      send(
-        :erlang.list_to_pid(unquote(:erlang.pid_to_list(self()))),
-        {:__livescript__, unquote(expr)}
-      )
-    end
-  end
-
-  def execute_code(exprs) do
-    num_exprs = length(exprs)
-
-    exprs
-    |> Enum.with_index()
-    |> Enum.take_while(fn {%Expression{} = expr, index} ->
-      is_last = index == num_exprs - 1
-
-      code_str = expr.code
-      start_line = expr.line_start
-
-      code =
-        case expr.quoted do
-          {:use, _, _} ->
-            code_str
-
-          {:require, _, _} ->
-            code_str
-
-          {:import, _, _} ->
-            code_str
-
-          {:alias, _, _} ->
-            code_str
-
-          {_, _, _} ->
-            """
-            {livescript_result__, livescript_binding__} = try do: (livescript_result__ = (#{code_str})
-              livescript_binding__ = binding() |> Keyword.filter(fn {k, _} -> k not in [:livescript_binding__, :livescript_result__] end)
-              {livescript_result__, livescript_binding__}
-            ), rescue: (
-              e ->
-                #{Macro.to_string(call_home_macro(:error))}
-                reraise e, __STACKTRACE__
-            )
-            """
-        end
-
-      do_execute_code(code,
-        start_line: start_line,
-        async: true,
-        call_home_with: :complete
-      )
-
-      was_successful =
-        receive do
-          {:__livescript__, :complete} -> true
-          {:__livescript__, :error} -> false
-        end
-
-      if was_successful do
-        # Fetch the bindings from the try scope
-        do_execute_code(call_home_macro(quote do: Keyword.keys(livescript_binding__)))
-        binding_keys = receive do: ({:__livescript__, x} -> x)
-
-        # Set them into the parent scope
-        binding_keys
-        |> Enum.each(fn k ->
-          kvar = Macro.var(k, nil)
-          do_execute_code(quote do: unquote(kvar) = livescript_binding__[unquote(k)])
-        end)
-
-        if is_last do
-          do_execute_code("", print_result: "livescript_result__")
-        end
-
-        true
-      else
-        false
-      end
-    end)
-    |> Enum.map(fn {expr, _} -> expr end)
-  end
-
-  defp do_execute_code(code, opts \\ [])
-
-  defp do_execute_code(code, opts) when is_binary(code) do
-    {iex_evaluator, iex_server} = find_iex()
-    print_result = Keyword.get(opts, :print_result, "IEx.dont_display_result()")
-    call_home_with = Keyword.get(opts, :call_home_with, :__livescript_complete__)
-    start_line = Keyword.get(opts, :start_line, 1)
-    async = Keyword.get(opts, :async, false)
-
-    call_home_expr =
-      case call_home_with do
-        nil -> nil
-        expr -> Macro.to_string(call_home_macro(expr))
-      end
-
-    code = """
-    #{code}
-    #{call_home_expr}
-    #{print_result}
-    """
-
-    send(iex_evaluator, {:eval, iex_server, code, start_line, ""})
-
-    if not async and is_atom(call_home_with) do
-      receive do
-        {:__livescript__, ^call_home_with} -> true
-      end
-    end
-  end
-
-  defp do_execute_code(exprs, opts) do
-    do_execute_code(Macro.to_string(exprs), opts)
-  end
-
-  defp schedule_poll do
-    Process.send_after(self(), :poll, @poll_interval)
-  end
-
   @doc """
   Split two lists at the first difference.
   Returns a tuple with the common prefix, the rest of the first list, and the rest of the second list.
@@ -393,43 +308,6 @@ defmodule Livescript do
 
   defp do_split_at_diff([h | t1], [h | t2], acc), do: do_split_at_diff(t1, t2, [h | acc])
   defp do_split_at_diff(rest1, rest2, acc), do: {acc, rest1, rest2}
-
-  defp find_iex(opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 5000)
-    start_time = System.monotonic_time(:millisecond)
-    do_find_iex(timeout, start_time)
-  end
-
-  defp do_find_iex(timeout, start_time) do
-    :erlang.processes()
-    |> Enum.find_value(fn pid ->
-      info = Process.info(pid)
-
-      case info[:dictionary][:"$initial_call"] do
-        {IEx.Evaluator, _, _} ->
-          iex_server = info[:dictionary][:iex_server]
-          iex_evaluator = pid
-          {iex_evaluator, iex_server}
-
-        _ ->
-          nil
-      end
-    end)
-    |> case do
-      nil ->
-        current_time = System.monotonic_time(:millisecond)
-
-        if current_time - start_time < timeout do
-          Process.sleep(10)
-          do_find_iex(timeout, start_time)
-        else
-          raise "Timeout: Could not find IEx process within #{timeout} milliseconds"
-        end
-
-      x ->
-        x
-    end
-  end
 
   @doc """
   Parse the code and return a list of expressions with the line range.
@@ -490,6 +368,10 @@ defmodule Livescript do
   end
 
   defp line_range(_), do: {:infinity, 0}
+
+  defp schedule_poll do
+    Process.send_after(self(), :poll, @poll_interval)
+  end
 end
 
 defmodule Livescript.TCP do
