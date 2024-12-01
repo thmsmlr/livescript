@@ -93,11 +93,19 @@ defmodule Livescript do
   end
 
   def run_at_cursor(line_number) when is_integer(line_number) do
-    GenServer.call(__MODULE__, {:run_at_cursor, line_number})
+    run_at_cursor(line_number, :expression)
+  end
+
+  def run_at_cursor(line_number, mode) when is_integer(line_number) do
+    GenServer.call(__MODULE__, {:run_at_cursor, line_number, mode})
   end
 
   def run_at_cursor(code, line_number) when is_integer(line_number) and is_binary(code) do
-    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number})
+    run_at_cursor(code, line_number, :expression)
+  end
+
+  def run_at_cursor(code, line_number, mode) when is_integer(line_number) and is_binary(code) do
+    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, mode})
   end
 
   # Server callbacks
@@ -140,21 +148,31 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_call({:run_at_cursor, line_number}, from, %{file_path: file_path} = state) do
+  def handle_call({:run_at_cursor, line_number, mode}, from, %{file_path: file_path} = state) do
     code = File.read!(file_path)
-    handle_call({:run_at_cursor, code, line_number}, from, state)
+    handle_call({:run_at_cursor, code, line_number, mode}, from, state)
   end
 
   @impl true
-  def handle_call({:run_at_cursor, code, line_number}, from, %{file_path: _file_path} = state) do
-    with {:ok, exprs} <- parse_code(code) do
+  def handle_call(
+        {:run_at_cursor, code, line_number, mode},
+        from,
+        %{file_path: _file_path} = state
+      ) do
+    opts = if mode == :block, do: [block_mode: true], else: []
+
+    with {:ok, exprs} <- parse_code(code, opts) do
       exprs_at =
         exprs
         |> Enum.filter(fn %Expression{line_start: line_start, line_end: line_end} ->
           line_start <= line_number and line_end >= line_number
         end)
 
-      IO.puts(IO.ANSI.yellow() <> "Running code at line #{line_number}:" <> IO.ANSI.reset())
+      mode_str = if mode == :block, do: "block", else: "expression"
+
+      IO.puts(
+        IO.ANSI.yellow() <> "Running #{mode_str} at line #{line_number}:" <> IO.ANSI.reset()
+      )
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
         executed_exprs = Livescript.Executor.execute(exprs_at)
@@ -314,15 +332,15 @@ defmodule Livescript do
 
   It parses the code twice to get the precise line range (see [string_to_quoted/2](https://hexdocs.pm/elixir/1.17.2/Code.html#quoted_to_algebra/2-formatting-considerations)).
   """
-  def parse_code(code) do
-    opts = [
+  def parse_code(code, opts \\ []) do
+    parse_opts = [
       literal_encoder: &{:ok, {:__block__, &2, [&1]}},
       token_metadata: true,
       unescape: false
     ]
 
     with {:ok, {_, _, quoted}} <- Code.string_to_quoted(code),
-         {:ok, {_, _, precise_quoted}} <- Code.string_to_quoted(code, opts) do
+         {:ok, {_, _, precise_quoted}} <- Code.string_to_quoted(code, parse_opts) do
       exprs =
         Enum.zip(quoted, precise_quoted)
         |> Enum.map(fn {quoted, precise_quoted} ->
@@ -343,8 +361,42 @@ defmodule Livescript do
           }
         end)
 
+      exprs =
+        if Keyword.get(opts, :block_mode, false) do
+          merge_adjacent_expressions(exprs)
+        else
+          exprs
+        end
+
       {:ok, exprs}
     end
+  end
+
+  @doc """
+  Merges adjacent expressions into blocks. Two expressions are considered adjacent
+  if the end line of one expression is immediately followed by the start line of another.
+  """
+  def merge_adjacent_expressions(exprs) do
+    exprs
+    |> Enum.sort_by(& &1.line_start)
+    |> Enum.reduce([], fn expr, acc ->
+      case acc do
+        [prev | rest] when prev.line_end + 1 == expr.line_start ->
+          # Merge the expressions into a block
+          merged = %Livescript.Expression{
+            quoted: {:__block__, [], [prev.quoted, expr.quoted]},
+            code: prev.code <> "\n" <> expr.code,
+            line_start: prev.line_start,
+            line_end: expr.line_end
+          }
+
+          [merged | rest]
+
+        _ ->
+          [expr | acc]
+      end
+    end)
+    |> Enum.reverse()
   end
 
   defp line_range({_, opts, nil}) do
@@ -498,15 +550,24 @@ defmodule Livescript.TCP do
     end
   end
 
-  defp handle_command(%{"command" => "run_at_cursor", "code" => code, "line" => line}) do
-    case Livescript.run_at_cursor(code, line) do
+  defp handle_command(%{
+         "command" => "run_at_cursor",
+         "code" => code,
+         "line" => line,
+         "mode" => mode
+       }) do
+    mode_atom = String.to_existing_atom(mode)
+
+    case Livescript.run_at_cursor(code, line, mode_atom) do
       :ok -> {:ok, true}
       error -> error
     end
   end
 
-  defp handle_command(%{"command" => "run_at_cursor", "line" => line}) do
-    case Livescript.run_at_cursor(line) do
+  defp handle_command(%{"command" => "run_at_cursor", "line" => line, "mode" => mode}) do
+    mode_atom = String.to_existing_atom(mode)
+
+    case Livescript.run_at_cursor(line, mode_atom) do
       :ok -> {:ok, true}
       error -> error
     end
@@ -522,8 +583,8 @@ defmodule Livescript.TCP do
      }}
   end
 
-  defp handle_command(%{"command" => "parse_code", "code" => code}) do
-    case Livescript.parse_code(code) do
+  defp handle_command(%{"command" => "parse_code", "code" => code, "block_mode" => block_mode}) do
+    case Livescript.parse_code(code, block_mode: block_mode) do
       {:ok, exprs} ->
         {:ok,
          exprs

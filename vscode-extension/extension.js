@@ -76,11 +76,13 @@ class LiveScriptCodeLensProvider {
 
 		return new Promise((resolve, reject) => {
 			const code = document.getText();
+			const executionMode = vscode.workspace.getConfiguration('livescript').get('executionMode');
 
-			// Send code to Elixir server for parsing
+			// Send code to Elixir server for parsing with block mode enabled if in block mode
 			sendCommand({
 				command: 'parse_code',
-				code: code
+				code: code,
+				block_mode: executionMode === 'block'
 			}, (response) => {
 				if (!response.success) {
 					// Check if this is a parse error
@@ -98,20 +100,22 @@ class LiveScriptCodeLensProvider {
 				this.expressions = response.result;
 				this.codeLenses = [];
 
-				// Create a CodeLens for each expression
+				// Create CodeLenses for each expression
 				this.expressions.forEach(expr => {
 					const range = new vscode.Range(
 						expr.line_start - 1, 0,  // VS Code is 0-based, Elixir is 1-based
 						expr.line_start - 1, 0
 					);
 
-					const codeLens = new vscode.CodeLens(range, {
-						title: '▷ Execute (⇧⏎)',
+					const title = executionMode === 'block' ? 
+						'▷ Execute Block (⇧⏎)' : 
+						'▷ Execute (⇧⏎)';
+
+					this.codeLenses.push(new vscode.CodeLens(range, {
+						title: title,
 						command: 'extension.livescript.run_at_cursor',
 						arguments: [{ line: expr.line_start }]
-					});
-
-					this.codeLenses.push(codeLens);
+					}));
 				});
 
 				resolve(this.codeLenses);
@@ -233,6 +237,15 @@ function activate(context) {
 	const codeLensProvider = new LiveScriptCodeLensProvider();
 	global.livescriptProvider = codeLensProvider; // Store for access
 
+	// Watch for configuration changes
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration(event => {
+			if (event.affectsConfiguration('livescript.executionMode')) {
+				codeLensProvider.refresh();
+			}
+		})
+	);
+
 	// Add command for starting the server
 	const startServerCommand = vscode.commands.registerCommand(
 		'extension.livescript.start_server',
@@ -261,8 +274,8 @@ function activate(context) {
 		}
 	);
 
-	// Update existing command handlers to use sendCommandIfConnected
-	const disposableAtCursor = vscode.commands.registerCommand(
+	// Register the run_at_cursor command
+	let runAtCursorCommand = vscode.commands.registerCommand(
 		'extension.livescript.run_at_cursor',
 		(options) => {
 			const editor = vscode.window.activeTextEditor;
@@ -274,25 +287,25 @@ function activate(context) {
 			}
 
 			const code = editor.document.getText();
+			const executionMode = vscode.workspace.getConfiguration('livescript').get('executionMode');
 
+			// Send the appropriate command based on execution mode
 			sendCommandIfConnected({
 				command: 'run_at_cursor',
 				code: code,
 				line: line,
-				filepath: editor.document.fileName
-			}, () => {
-				if (options.moveCursorToNextExpression) {
-					// After executing, find and move to next expression
-					const nextExpr = findNextExpression(codeLensProvider.expressions, line);
-					if (nextExpr) {
-						// Move cursor to start of next expression
-						const newPosition = new vscode.Position(nextExpr.line_start - 1, 0);
-						editor.selection = new vscode.Selection(newPosition, newPosition);
-						// Reveal the new cursor position
-						editor.revealRange(new vscode.Range(newPosition, newPosition));
-					}
-				}
+				mode: executionMode === 'block' ? 'block' : 'expression'
 			});
+
+			// Move cursor to next expression if specified
+			if (options?.moveCursorToNextExpression) {
+				const provider = getCodeLensProvider();
+				const nextExpr = findNextExpression(provider.expressions, line);
+				if (nextExpr) {
+					const newPosition = new vscode.Position(nextExpr.line_start - 1, 0);
+					editor.selection = new vscode.Selection(newPosition, newPosition);
+				}
+			}
 		}
 	);
 
@@ -320,13 +333,33 @@ function activate(context) {
 		}
 	});
 
+	// Register the run_block_at_cursor command
+	let runBlockAtCursorCommand = vscode.commands.registerCommand(
+		'extension.livescript.run_block_at_cursor',
+		(options) => {
+			const editor = vscode.window.activeTextEditor;
+			if (!editor) return;
+
+			const line = options?.line || (editor.selection.active.line + 1);
+			const code = editor.document.getText();
+
+			sendCommandIfConnected({
+				command: 'run_at_cursor',
+				code: code,
+				line: line,
+				mode: 'block'
+			});
+		}
+	);
+
 	// Add the subscriptions to context
 	context.subscriptions.push(
 		disposableProvider,
-		disposableAtCursor,
 		disposableAfterCursor,
 		disposableSelectionChange,
-		startServerCommand
+		startServerCommand,
+		runAtCursorCommand,
+		runBlockAtCursorCommand
 	);
 }
 

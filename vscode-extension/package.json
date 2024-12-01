@@ -17,8 +17,12 @@
 	"contributes": {
 		"commands": [
 			{
+				"command": "extension.livescript.start_server",
+				"title": "LiveScript: Start Server"
+			},
+			{
 				"command": "extension.livescript.run_at_cursor",
-				"title": "LiveScript: Run Expression At Cursor"
+				"title": "LiveScript: Run at Cursor"
 			},
 			{
 				"command": "extension.livescript.run_after_cursor",
@@ -60,7 +64,22 @@
 				"key": "ctrl+shift+enter",
 				"when": "editorTextFocus && editorLangId == 'elixir'"
 			}
-		]
+		],
+		"configuration": {
+			"title": "LiveScript",
+			"properties": {
+				"livescript.executionMode": {
+					"type": "string",
+					"default": "block",
+					"enum": ["expression", "block"],
+					"enumDescriptions": [
+						"Execute individual expressions",
+						"Execute blocks of adjacent expressions"
+					],
+					"description": "Controls whether to execute individual expressions or blocks of adjacent expressions"
+				}
+			}
+		}
 	},
 	"scripts": {},
 	"devDependencies": {
