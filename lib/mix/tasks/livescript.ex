@@ -36,16 +36,7 @@ defmodule Mix.Tasks.Livescript do
     Task.async(fn ->
       qualified_exs_path = Path.absname(exs_path) |> Path.expand()
       Logger.put_module_level(Livescript, :info)
-
-      children = [
-        {Task.Supervisor, name: Livescript.TaskSupervisor},
-        {Livescript.Executor, []},
-        {Livescript, qualified_exs_path},
-        {Task, fn -> Livescript.TCP.server() end}
-      ]
-
-      opts = [strategy: :one_for_one, name: Livescript.Supervisor]
-      {:ok, _} = Supervisor.start_link(children, opts)
+      {:ok, _} = Livescript.App.start(:normal, [qualified_exs_path])
       Process.sleep(:infinity)
     end)
   end

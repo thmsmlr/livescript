@@ -286,8 +286,8 @@ defmodule Livescript do
       unescape: false
     ]
 
-    with {:ok, {_, _, quoted}} <- Code.string_to_quoted(code),
-         {:ok, {_, _, precise_quoted}} <- Code.string_to_quoted(code, parse_opts) do
+    with {:ok, quoted} <- string_to_quoted_expressions(code),
+         {:ok, precise_quoted} <- string_to_quoted_expressions(code, parse_opts) do
       exprs =
         Enum.zip(quoted, precise_quoted)
         |> Enum.map(fn {quoted, precise_quoted} ->
@@ -316,6 +316,14 @@ defmodule Livescript do
         end
 
       {:ok, exprs}
+    end
+  end
+
+  defp string_to_quoted_expressions(code, opts \\ []) do
+    case Code.string_to_quoted(code, opts) do
+      {:ok, {:__block__, _, quoted}} -> {:ok, quoted}
+      {:ok, quoted} -> {:ok, [quoted]}
+      {:error, reason} -> {:error, reason}
     end
   end
 
