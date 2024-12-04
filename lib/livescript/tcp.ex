@@ -114,31 +114,16 @@ defmodule Livescript.TCP do
     end
   end
 
-  defp handle_command(%{"command" => "run_after_cursor", "line" => line}) do
-    case Livescript.run_after_cursor(line) do
-      :ok -> {:ok, true}
-      error -> error
-    end
-  end
-
   defp handle_command(%{
          "command" => "run_at_cursor",
          "code" => code,
          "line" => line,
+         "line_end" => line_end,
          "mode" => mode
        }) do
     mode_atom = String.to_existing_atom(mode)
 
-    case Livescript.run_at_cursor(code, line, mode_atom) do
-      :ok -> {:ok, true}
-      error -> error
-    end
-  end
-
-  defp handle_command(%{"command" => "run_at_cursor", "line" => line, "mode" => mode}) do
-    mode_atom = String.to_existing_atom(mode)
-
-    case Livescript.run_at_cursor(line, mode_atom) do
+    case Livescript.run_at_cursor(code, line, line_end, mode_atom) do
       :ok -> {:ok, true}
       error -> error
     end

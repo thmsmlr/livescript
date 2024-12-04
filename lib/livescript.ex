@@ -31,28 +31,13 @@ defmodule Livescript do
 
       Task.async(fn -> Livescript.run_after_cursor(27) end)
   """
-  def run_after_cursor(line_number) when is_integer(line_number) do
-    GenServer.call(__MODULE__, {:run_after_cursor, line_number})
-  end
-
   def run_after_cursor(code, line_number) when is_integer(line_number) and is_binary(code) do
     GenServer.call(__MODULE__, {:run_after_cursor, code, line_number})
   end
 
-  def run_at_cursor(line_number) when is_integer(line_number) do
-    run_at_cursor(line_number, :expression)
-  end
-
-  def run_at_cursor(line_number, mode) when is_integer(line_number) do
-    GenServer.call(__MODULE__, {:run_at_cursor, line_number, mode})
-  end
-
-  def run_at_cursor(code, line_number) when is_integer(line_number) and is_binary(code) do
-    run_at_cursor(code, line_number, :expression)
-  end
-
-  def run_at_cursor(code, line_number, mode) when is_integer(line_number) and is_binary(code) do
-    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, mode})
+  def run_at_cursor(code, line_number, line_end, mode \\ :expression)
+      when is_integer(line_number) and is_integer(line_end) and is_binary(code) do
+    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end, mode})
   end
 
   # Server callbacks
@@ -62,12 +47,6 @@ defmodule Livescript do
     schedule_poll()
     state = Map.merge(state, %{executed_exprs: [], last_modified: nil})
     {:ok, state}
-  end
-
-  @impl true
-  def handle_call({:run_after_cursor, line_number}, from, %{file_path: file_path} = state) do
-    code = File.read!(file_path)
-    handle_call({:run_after_cursor, code, line_number}, from, state)
   end
 
   @impl true
@@ -95,14 +74,8 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_call({:run_at_cursor, line_number, mode}, from, %{file_path: file_path} = state) do
-    code = File.read!(file_path)
-    handle_call({:run_at_cursor, code, line_number, mode}, from, state)
-  end
-
-  @impl true
   def handle_call(
-        {:run_at_cursor, code, line_number, mode},
+        {:run_at_cursor, code, line_start, line_end, mode},
         from,
         %{file_path: _file_path} = state
       ) do
@@ -111,15 +84,24 @@ defmodule Livescript do
     with {:ok, exprs} <- parse_code(code, opts) do
       exprs_at =
         exprs
-        |> Enum.filter(fn %Expression{line_start: line_start, line_end: line_end} ->
-          line_start <= line_number and line_end >= line_number
+        |> Enum.filter(fn %Expression{line_start: expr_start, line_end: expr_end} ->
+          # Expression overlaps with selection if:
+          # - Expression starts within selection, OR
+          # - Expression ends within selection, OR
+          # - Expression completely contains selection
+          (expr_start >= line_start && expr_start <= line_end) ||
+            (expr_end >= line_start && expr_end <= line_end) ||
+            (expr_start <= line_start && expr_end >= line_end)
         end)
 
       mode_str = if mode == :block, do: "block", else: "expression"
 
-      IO.puts(
-        IO.ANSI.yellow() <> "Running #{mode_str} at line #{line_number}:" <> IO.ANSI.reset()
-      )
+      range_str =
+        if line_start == line_end,
+          do: "line #{line_start}",
+          else: "lines #{line_start}-#{line_end}"
+
+      IO.puts(IO.ANSI.yellow() <> "Running #{mode_str} at #{range_str}:" <> IO.ANSI.reset())
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
         executed_exprs = Livescript.Executor.execute(exprs_at)

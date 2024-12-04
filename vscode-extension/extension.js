@@ -107,8 +107,8 @@ class LiveScriptCodeLensProvider {
 						expr.line_start - 1, 0
 					);
 
-					const title = executionMode === 'block' ? 
-						'▷ Execute Block (⇧⏎)' : 
+					const title = executionMode === 'block' ?
+						'▷ Execute Block (⇧⏎)' :
 						'▷ Execute (⇧⏎)';
 
 					this.codeLenses.push(new vscode.CodeLens(range, {
@@ -282,8 +282,18 @@ function activate(context) {
 			if (!editor) return;
 
 			let line = options.line;
+			let line_end;
 			if (line === undefined) {
 				line = editor.selection.active.line + 1;
+
+				if (editor.selection.isEmpty) {
+					line_end = line;
+				} else {
+					line = editor.selection.start.line + 1;
+					line_end = editor.selection.end.line + 1;
+				}
+				log(`line: ${line}`);
+				log(`line_end: ${line_end}`);
 			}
 
 			const code = editor.document.getText();
@@ -294,17 +304,18 @@ function activate(context) {
 				command: 'run_at_cursor',
 				code: code,
 				line: line,
+				line_end: line_end,
 				mode: executionMode === 'block' ? 'block' : 'expression'
 			});
 
 			// Move cursor to next expression if specified
 			if (options?.moveCursorToNextExpression) {
 				const provider = getCodeLensProvider();
-				const nextExpr = findNextExpression(provider.expressions, line);
+				const nextExpr = findNextExpression(provider.expressions, line_end);
 				if (nextExpr) {
 					const newPosition = new vscode.Position(nextExpr.line_start - 1, 0);
 					editor.selection = new vscode.Selection(newPosition, newPosition);
-					
+
 					// Reveal the new position in the middle of the viewport
 					const range = new vscode.Range(newPosition, newPosition);
 					editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
