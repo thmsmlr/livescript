@@ -304,6 +304,10 @@ function activate(context) {
 				if (nextExpr) {
 					const newPosition = new vscode.Position(nextExpr.line_start - 1, 0);
 					editor.selection = new vscode.Selection(newPosition, newPosition);
+					
+					// Reveal the new position in the middle of the viewport
+					const range = new vscode.Range(newPosition, newPosition);
+					editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 				}
 			}
 		}
