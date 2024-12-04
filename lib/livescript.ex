@@ -117,86 +117,73 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_info(:poll, %{file_path: file_path, last_modified: nil} = state) do
-    # first poll, run the code completely
-    with {:ok, %{mtime: mtime}} <- File.stat(file_path),
-         {:ok, current_code} <- File.read(file_path),
-         {:ok, current_exprs} <- parse_code(current_code) do
-      # Preamble to make argv the same as when the file is run with elixir without livescript
-      preamble_code(file_path)
-      |> Livescript.Executor.execute()
+  def handle_info(:poll, %{file_path: file_path} = state) do
+    mtime = File.stat!(file_path).mtime
+
+    with {:modified, true} <-
+           {:modified, state.last_modified == nil || mtime > state.last_modified},
+         {:read_file, {:ok, next_code}} <- {:read_file, File.read(file_path)},
+         {:parse_code, {:ok, next_exprs}} <- {:parse_code, parse_code(next_code)} do
+      # Print modification message (except for first run)
+      if state.last_modified != nil do
+        [_, current_time] =
+          NaiveDateTime.from_erl!(:erlang.localtime())
+          |> NaiveDateTime.to_string()
+          |> String.split(" ")
+
+        basename = Path.basename(file_path)
+
+        IO.puts(
+          IO.ANSI.yellow() <>
+            "[#{current_time}] #{basename} has been modified" <> IO.ANSI.reset()
+        )
+      end
+
+      # For first run, execute preamble
+      if state.last_modified == nil do
+        preamble_code(file_path)
+        |> Livescript.Executor.execute()
+      end
+
+      # Calculate which expressions to run
+      {common_exprs, rest_next_exprs} =
+        if state.last_modified == nil do
+          {[], next_exprs}
+        else
+          {common, _rest_exprs, _rest_next} =
+            split_at_diff(
+              Enum.map(state.executed_exprs, & &1.quoted),
+              Enum.map(next_exprs, & &1.quoted)
+            )
+
+          {Enum.take(next_exprs, length(common)), Enum.drop(next_exprs, length(common))}
+        end
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        executed_exprs = Livescript.Executor.execute(current_exprs)
-        {:done_executing, executed_exprs, mtime}
+        executed_exprs = Livescript.Executor.execute(rest_next_exprs)
+        {:done_executing, common_exprs ++ executed_exprs, mtime}
       end)
 
       {:noreply, %{state | last_modified: mtime}}
     else
-      {:error, reason} ->
+      {:modified, false} ->
+        {:noreply, state}
+
+      {:read_file, {:error, err}} ->
         IO.puts(
           IO.ANSI.red() <>
-            "Failed to read & run file #{file_path}: #{inspect(reason)}" <> IO.ANSI.reset()
+            "Failed to process file: #{inspect(err)}" <> IO.ANSI.reset()
         )
 
-        {:noreply, %{state | last_modified: File.stat!(file_path).mtime}}
-    end
-  after
-    schedule_poll()
-  end
+        {:noreply, %{state | last_modified: mtime}}
 
-  @impl true
-  def handle_info(:poll, %{file_path: file_path} = state) do
-    case File.stat(file_path) do
-      {:ok, %{mtime: mtime}} ->
-        if mtime > state.last_modified do
-          [_, current_time] =
-            NaiveDateTime.from_erl!(:erlang.localtime())
-            |> NaiveDateTime.to_string()
-            |> String.split(" ")
+      {:parse_code, {:error, reason}} ->
+        IO.puts(
+          IO.ANSI.red() <>
+            "Failed to parse file: #{inspect(reason)}" <> IO.ANSI.reset()
+        )
 
-          basename = Path.basename(file_path)
-
-          IO.puts(
-            IO.ANSI.yellow() <>
-              "[#{current_time}] #{basename} has been modified" <> IO.ANSI.reset()
-          )
-
-          next_code = File.read!(file_path)
-
-          case parse_code(next_code) do
-            {:ok, next_exprs} ->
-              {common_exprs, _rest_exprs, _rest_next_exprs} =
-                split_at_diff(
-                  Enum.map(state.executed_exprs, & &1.quoted),
-                  Enum.map(next_exprs, & &1.quoted)
-                )
-
-              common_exprs = Enum.take(next_exprs, length(common_exprs))
-              rest_next_exprs = Enum.drop(next_exprs, length(common_exprs))
-
-              Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-                executed_exprs = Livescript.Executor.execute(rest_next_exprs)
-                {:done_executing, common_exprs ++ executed_exprs, mtime}
-              end)
-
-              {:noreply, %{state | last_modified: mtime}}
-
-            {:error, err} ->
-              IO.puts(
-                IO.ANSI.red() <>
-                  "Syntax error: #{inspect(err)}" <> IO.ANSI.reset()
-              )
-
-              {:noreply, %{state | last_modified: mtime}}
-          end
-        else
-          {:noreply, state}
-        end
-
-      {:error, _reason} ->
-        IO.puts(IO.ANSI.red() <> "Failed to stat file #{file_path}" <> IO.ANSI.reset())
-        {:noreply, state}
+        {:noreply, %{state | last_modified: mtime}}
     end
   catch
     e ->
