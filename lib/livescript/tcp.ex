@@ -118,12 +118,9 @@ defmodule Livescript.TCP do
          "command" => "run_at_cursor",
          "code" => code,
          "line" => line,
-         "line_end" => line_end,
-         "mode" => mode
+         "line_end" => line_end
        }) do
-    mode_atom = String.to_existing_atom(mode)
-
-    case Livescript.run_at_cursor(code, line, line_end, mode_atom) do
+    case Livescript.run_at_cursor(code, line, line_end) do
       :ok -> {:ok, true}
       error -> error
     end
@@ -139,20 +136,56 @@ defmodule Livescript.TCP do
      }}
   end
 
-  defp handle_command(%{"command" => "parse_code", "code" => code, "block_mode" => block_mode}) do
-    case Livescript.parse_code(code, block_mode: block_mode) do
-      {:ok, exprs} ->
-        {:ok,
-         exprs
-         |> Enum.map(fn expr ->
-           %{
-             expr: expr.code,
-             line_start: expr.line_start,
-             line_end: expr.line_end
-           }
-         end)}
+  defp handle_command(%{"command" => "parse_code", "code" => code, "mode" => mode}) do
+    with {:parse, {:ok, exprs}} <- {:parse, Livescript.parse_code(code)},
+         %{executed_exprs: executed_exprs} <- Livescript.get_state() do
+      exprs =
+        exprs
+        |> Enum.map(fn expr ->
+          %{
+            expr: expr.code,
+            line_start: expr.line_start,
+            line_end: expr.line_end,
+            executed:
+              Enum.any?(executed_exprs, fn executed_expr ->
+                executed_expr.quoted == expr.quoted
+              end)
+          }
+        end)
 
-      {:error, error} ->
+      case mode do
+        "block" ->
+          merged_exprs =
+            exprs
+            |> Enum.sort_by(& &1.line_start)
+            |> Enum.reduce([], fn expr, acc ->
+              case acc do
+                [prev | rest] when prev.line_end + 1 == expr.line_start ->
+                  merged = %{
+                    expr: prev.expr <> "\n" <> expr.expr,
+                    line_start: prev.line_start,
+                    line_end: expr.line_end,
+                    executed: prev.executed or expr.executed
+                  }
+
+                  [merged | rest]
+
+                _ ->
+                  [expr | acc]
+              end
+            end)
+            |> Enum.reverse()
+
+          {:ok, merged_exprs}
+
+        "expression" ->
+          {:ok, exprs}
+
+        _ ->
+          {:error, %{type: "unknown_mode", details: "`#{inspect(mode)}` mode not recognized"}}
+      end
+    else
+      {:parse, {:error, error}} ->
         {:error,
          %{
            type: "parse_error",

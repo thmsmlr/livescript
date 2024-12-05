@@ -35,12 +35,17 @@ async function getServerPort(filepath) {
 
 // Define the CodeLens provider
 class LiveScriptCodeLensProvider {
-	constructor() {
+	constructor(context) {
 		this.codeLenses = [];
 		this.expressions = [];
 		this._onDidChangeCodeLenses = new vscode.EventEmitter();
 		this.onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
 		this.activeConnections = new Map(); // Track filepath -> connection status
+
+		// Create decoration type for executed expressions
+		this.executedDecorationType = vscode.window.createTextEditorDecorationType({
+			isWholeLine: true,
+		});
 	}
 
 	// Add verifyServerConnection method
@@ -55,6 +60,22 @@ class LiveScriptCodeLensProvider {
 				resolve(isConnected);
 			});
 		});
+	}
+
+	// Add method to update decorations
+	updateDecorations(editor) {
+		if (!editor || !this.expressions) {
+			return;
+		}
+
+		const executedRanges = this.expressions
+			.filter(expr => expr.executed)
+			.map(expr => new vscode.Range(
+				expr.line_start - 1, 0,
+				expr.line_end - 1, Number.MAX_VALUE
+			));
+
+		editor.setDecorations(this.executedDecorationType, executedRanges);
 	}
 
 	// Update provideCodeLenses
@@ -82,7 +103,7 @@ class LiveScriptCodeLensProvider {
 			sendCommand({
 				command: 'parse_code',
 				code: code,
-				block_mode: executionMode === 'block'
+				mode: executionMode,
 			}, (response) => {
 				if (!response.success) {
 					// Check if this is a parse error
@@ -100,6 +121,9 @@ class LiveScriptCodeLensProvider {
 				this.expressions = response.result;
 				this.codeLenses = [];
 
+				// Update decorations after getting new expressions
+				this.updateDecorations(vscode.window.activeTextEditor);
+
 				// Create CodeLenses for each expression
 				this.expressions.forEach(expr => {
 					const range = new vscode.Range(
@@ -114,7 +138,7 @@ class LiveScriptCodeLensProvider {
 					this.codeLenses.push(new vscode.CodeLens(range, {
 						title: title,
 						command: 'extension.livescript.run_at_cursor',
-						arguments: [{ line: expr.line_start }]
+						arguments: [{ line: expr.line_start, line_end: expr.line_end }]
 					}));
 				});
 
@@ -125,6 +149,8 @@ class LiveScriptCodeLensProvider {
 
 	refresh() {
 		this._onDidChangeCodeLenses.fire();
+		// Update decorations when refreshing
+		this.updateDecorations(vscode.window.activeTextEditor);
 	}
 }
 
@@ -234,8 +260,17 @@ function activate(context) {
 	context.subscriptions.push(outputChannel);
 
 	// Create the CodeLens provider instance
-	const codeLensProvider = new LiveScriptCodeLensProvider();
+	const codeLensProvider = new LiveScriptCodeLensProvider(context);
 	global.livescriptProvider = codeLensProvider; // Store for access
+
+	// Watch for active editor changes to update decorations
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(editor => {
+			if (editor) {
+				codeLensProvider.updateDecorations(editor);
+			}
+		})
+	);
 
 	// Watch for configuration changes
 	context.subscriptions.push(
@@ -281,23 +316,34 @@ function activate(context) {
 			const editor = vscode.window.activeTextEditor;
 			if (!editor) return;
 
+			const provider = getCodeLensProvider();
+			const executionMode = vscode.workspace.getConfiguration('livescript').get('executionMode');
+
 			let line = options.line;
-			let line_end;
+			let line_end = options.line_end;
+
 			if (line === undefined) {
 				line = editor.selection.active.line + 1;
 
 				if (editor.selection.isEmpty) {
-					line_end = line;
+					// todo: find the line end depending on execution mode
+					if (executionMode === 'block') {
+						let expr = provider.expressions.find(expr =>
+							expr.line_start <= line && expr.line_end >= line
+						);
+						line = expr.line_start;
+						line_end = expr.line_end;
+					} else {
+						line_end = line;
+					}
 				} else {
 					line = editor.selection.start.line + 1;
 					line_end = editor.selection.end.line + 1;
 				}
-				log(`line: ${line}`);
-				log(`line_end: ${line_end}`);
 			}
+			if (!line_end) { line_end = line; }
 
 			const code = editor.document.getText();
-			const executionMode = vscode.workspace.getConfiguration('livescript').get('executionMode');
 
 			// Send the appropriate command based on execution mode
 			sendCommandIfConnected({
@@ -305,12 +351,10 @@ function activate(context) {
 				code: code,
 				line: line,
 				line_end: line_end,
-				mode: executionMode === 'block' ? 'block' : 'expression'
 			});
 
 			// Move cursor to next expression if specified
 			if (options?.moveCursorToNextExpression) {
-				const provider = getCodeLensProvider();
 				const nextExpr = findNextExpression(provider.expressions, line_end);
 				if (nextExpr) {
 					const newPosition = new vscode.Position(nextExpr.line_start - 1, 0);
@@ -348,33 +392,13 @@ function activate(context) {
 		}
 	});
 
-	// Register the run_block_at_cursor command
-	let runBlockAtCursorCommand = vscode.commands.registerCommand(
-		'extension.livescript.run_block_at_cursor',
-		(options) => {
-			const editor = vscode.window.activeTextEditor;
-			if (!editor) return;
-
-			const line = options?.line || (editor.selection.active.line + 1);
-			const code = editor.document.getText();
-
-			sendCommandIfConnected({
-				command: 'run_at_cursor',
-				code: code,
-				line: line,
-				mode: 'block'
-			});
-		}
-	);
-
 	// Add the subscriptions to context
 	context.subscriptions.push(
 		disposableProvider,
 		disposableAfterCursor,
 		disposableSelectionChange,
 		startServerCommand,
-		runAtCursorCommand,
-		runBlockAtCursorCommand
+		runAtCursorCommand
 	);
 }
 

@@ -35,9 +35,13 @@ defmodule Livescript do
     GenServer.call(__MODULE__, {:run_after_cursor, code, line_number})
   end
 
-  def run_at_cursor(code, line_number, line_end, mode \\ :expression)
+  def run_at_cursor(code, line_number, line_end)
       when is_integer(line_number) and is_integer(line_end) and is_binary(code) do
-    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end, mode})
+    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end})
+  end
+
+  def get_state do
+    GenServer.call(__MODULE__, :get_state)
   end
 
   # Server callbacks
@@ -47,6 +51,11 @@ defmodule Livescript do
     schedule_poll()
     state = Map.merge(state, %{executed_exprs: [], last_modified: nil})
     {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:get_state, _from, state) do
+    {:reply, state, state}
   end
 
   @impl true
@@ -61,9 +70,9 @@ defmodule Livescript do
       IO.puts(IO.ANSI.yellow() <> "Running code after line #{line_number}:" <> IO.ANSI.reset())
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        executed_exprs = Livescript.Executor.execute(exprs_after)
+        Livescript.Executor.execute(exprs_after)
         GenServer.reply(from, :ok)
-        {:done_executing, executed_exprs}
+        {:done_executing, state.executed_exprs}
       end)
 
       {:noreply, state}
@@ -75,13 +84,11 @@ defmodule Livescript do
 
   @impl true
   def handle_call(
-        {:run_at_cursor, code, line_start, line_end, mode},
+        {:run_at_cursor, code, line_start, line_end},
         from,
         %{file_path: _file_path} = state
       ) do
-    opts = if mode == :block, do: [block_mode: true], else: []
-
-    with {:ok, exprs} <- parse_code(code, opts) do
+    with {:ok, exprs} <- parse_code(code) do
       exprs_at =
         exprs
         |> Enum.filter(fn %Expression{line_start: expr_start, line_end: expr_end} ->
@@ -94,19 +101,17 @@ defmodule Livescript do
             (expr_start <= line_start && expr_end >= line_end)
         end)
 
-      mode_str = if mode == :block, do: "block", else: "expression"
-
       range_str =
         if line_start == line_end,
           do: "line #{line_start}",
           else: "lines #{line_start}-#{line_end}"
 
-      IO.puts(IO.ANSI.yellow() <> "Running #{mode_str} at #{range_str}:" <> IO.ANSI.reset())
+      IO.puts(IO.ANSI.yellow() <> "Running code at #{range_str}:" <> IO.ANSI.reset())
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        executed_exprs = Livescript.Executor.execute(exprs_at)
+        Livescript.Executor.execute(exprs_at)
         GenServer.reply(from, :ok)
-        {:done_executing, executed_exprs}
+        {:done_executing, state.executed_exprs}
       end)
 
       {:noreply, state}
@@ -248,7 +253,7 @@ defmodule Livescript do
 
   It parses the code twice to get the precise line range (see [string_to_quoted/2](https://hexdocs.pm/elixir/1.17.2/Code.html#quoted_to_algebra/2-formatting-considerations)).
   """
-  def parse_code(code, opts \\ []) do
+  def parse_code(code) do
     parse_opts = [
       literal_encoder: &{:ok, {:__block__, &2, [&1]}},
       token_metadata: true,
@@ -277,13 +282,6 @@ defmodule Livescript do
           }
         end)
 
-      exprs =
-        if Keyword.get(opts, :block_mode, false) do
-          merge_adjacent_expressions(exprs)
-        else
-          exprs
-        end
-
       {:ok, exprs}
     end
   end
@@ -294,33 +292,6 @@ defmodule Livescript do
       {:ok, quoted} -> {:ok, [quoted]}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  @doc """
-  Merges adjacent expressions into blocks. Two expressions are considered adjacent
-  if the end line of one expression is immediately followed by the start line of another.
-  """
-  def merge_adjacent_expressions(exprs) do
-    exprs
-    |> Enum.sort_by(& &1.line_start)
-    |> Enum.reduce([], fn expr, acc ->
-      case acc do
-        [prev | rest] when prev.line_end + 1 == expr.line_start ->
-          # Merge the expressions into a block
-          merged = %Livescript.Expression{
-            quoted: {:__block__, [], [prev.quoted, expr.quoted]},
-            code: prev.code <> "\n" <> expr.code,
-            line_start: prev.line_start,
-            line_end: expr.line_end
-          }
-
-          [merged | rest]
-
-        _ ->
-          [expr | acc]
-      end
-    end)
-    |> Enum.reverse()
   end
 
   defp line_range({_, opts, nil}) do
