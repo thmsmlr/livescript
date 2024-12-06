@@ -8,8 +8,8 @@ defmodule Livescript.Executor do
     GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
   end
 
-  def execute(exprs) do
-    GenServer.call(__MODULE__, {:execute, exprs}, :infinity)
+  def execute(exprs, opts \\ []) do
+    GenServer.call(__MODULE__, {:execute, exprs, opts}, :infinity)
   end
 
   # Server Callbacks
@@ -20,14 +20,14 @@ defmodule Livescript.Executor do
   end
 
   @impl true
-  def handle_call({:execute, exprs}, _from, state) do
-    result = execute_code(exprs)
+  def handle_call({:execute, exprs, opts}, _from, state) do
+    result = execute_code(exprs, opts)
     {:reply, result, state}
   end
 
   # Helper functions moved from Livescript module
 
-  def execute_code(exprs) do
+  def execute_code(exprs, opts \\ []) do
     num_exprs = length(exprs)
 
     exprs
@@ -89,7 +89,9 @@ defmodule Livescript.Executor do
           do_execute_code(quote do: unquote(kvar) = livescript_binding__[unquote(k)])
         end)
 
-        if is_last do
+        ignore_last_expression = Keyword.get(opts, :ignore_last_expression, false)
+
+        if is_last and not ignore_last_expression do
           do_execute_code("", print_result: "livescript_result__")
         end
 

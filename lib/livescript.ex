@@ -52,7 +52,8 @@ defmodule Livescript do
 
     state =
       Map.merge(state, %{
-        executing_exprs: [],
+        pending_execution: [],
+        current_expr_running: nil,
         executed_exprs: [],
         last_modified: nil
       })
@@ -66,7 +67,7 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_call({:run_after_cursor, code, line_number}, from, %{file_path: _file_path} = state) do
+  def handle_call({:run_after_cursor, code, line_number}, _from, %{file_path: _file_path} = state) do
     with {:ok, exprs} <- parse_code(code) do
       exprs_after =
         exprs
@@ -76,17 +77,9 @@ defmodule Livescript do
 
       IO.puts(IO.ANSI.yellow() <> "Running code after line #{line_number}:" <> IO.ANSI.reset())
 
-      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        broadcast_event(:executing, %{
-          exprs: exprs_after
-        })
+      state = enqueue_execution(exprs_after, state, ignore: true)
 
-        Livescript.Executor.execute(exprs_after)
-        GenServer.reply(from, :ok)
-        {:done_executing, state.executed_exprs}
-      end)
-
-      {:noreply, %{state | executing_exprs: exprs_after}}
+      {:reply, :ok, state}
     else
       error ->
         {:reply, error, state}
@@ -96,7 +89,7 @@ defmodule Livescript do
   @impl true
   def handle_call(
         {:run_at_cursor, code, line_start, line_end},
-        from,
+        _from,
         %{file_path: _file_path} = state
       ) do
     with {:ok, exprs} <- parse_code(code) do
@@ -119,17 +112,9 @@ defmodule Livescript do
 
       IO.puts(IO.ANSI.yellow() <> "Running code at #{range_str}:" <> IO.ANSI.reset())
 
-      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        broadcast_event(:executing, %{
-          exprs: exprs_at
-        })
+      state = enqueue_execution(exprs_at, state, ignore: true)
 
-        Livescript.Executor.execute(exprs_at)
-        GenServer.reply(from, :ok)
-        {:done_executing, state.executed_exprs}
-      end)
-
-      {:noreply, %{state | executing_exprs: exprs_at}}
+      {:reply, :ok, state}
     else
       error ->
         {:reply, error, state}
@@ -179,16 +164,9 @@ defmodule Livescript do
           {Enum.take(next_exprs, length(common)), Enum.drop(next_exprs, length(common))}
         end
 
-      Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-        broadcast_event(:executing, %{
-          exprs: rest_next_exprs
-        })
+      state = enqueue_execution(rest_next_exprs, state, ignore: false)
 
-        executed_exprs = Livescript.Executor.execute(rest_next_exprs)
-        {:done_executing, common_exprs ++ executed_exprs, mtime}
-      end)
-
-      {:noreply, %{state | last_modified: mtime, executing_exprs: rest_next_exprs}}
+      {:noreply, %{state | executed_exprs: common_exprs, last_modified: mtime}}
     else
       {:modified, false} ->
         {:noreply, state}
@@ -218,28 +196,60 @@ defmodule Livescript do
   end
 
   @impl true
+  def handle_info(:process_queue, %{current_expr_running: x} = state) when not is_nil(x),
+    do: {:noreply, state}
+
+  @impl true
+  def handle_info(:process_queue, %{pending_execution: []} = state), do: {:noreply, state}
+
+  @impl true
+  def handle_info(:process_queue, %{pending_execution: [{expr, opts} | rest]} = state) do
+    Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+      broadcast_event(:executing, %{exprs: [expr]})
+      {ignore, opts} = Keyword.pop(opts, :ignore, false)
+      executed_exprs = Livescript.Executor.execute([expr], opts)
+
+      if ignore do
+        {:done_executing, []}
+      else
+        {:done_executing, executed_exprs}
+      end
+    end)
+
+    {:noreply, %{state | pending_execution: rest, current_expr_running: expr}}
+  end
+
+  @impl true
   def handle_info({_ref, {:done_executing, exprs}}, state) do
     broadcast_event(:done_executing, %{
       executed_exprs: exprs,
       last_modified: state.last_modified
     })
 
-    {:noreply, %{state | executed_exprs: exprs, executing_exprs: []}}
-  end
-
-  @impl true
-  def handle_info({_ref, {:done_executing, exprs, last_modified}}, state) do
-    broadcast_event(:done_executing, %{
-      executed_exprs: exprs,
-      last_modified: last_modified
-    })
-
     {:noreply,
-     %{state | executed_exprs: exprs, executing_exprs: [], last_modified: last_modified}}
+     %{state | executed_exprs: state.executed_exprs ++ exprs, current_expr_running: nil}}
+  after
+    send(self(), :process_queue)
   end
 
   def handle_info({:DOWN, _ref, _, _, :normal}, state) do
     {:noreply, state}
+  end
+
+  defp enqueue_execution(exprs, state, opts) when is_list(exprs) do
+    Keyword.validate!(opts, ignore: :boolean)
+    ignore = Keyword.get(opts, :ignore, false)
+
+    exprs =
+      exprs
+      |> Enum.with_index()
+      |> Enum.map(fn {expr, index} ->
+        {expr, ignore: ignore, ignore_last_expression: index != length(exprs) - 1}
+      end)
+
+    %{state | pending_execution: state.pending_execution ++ exprs}
+  after
+    send(self(), :process_queue)
   end
 
   # Helper functions

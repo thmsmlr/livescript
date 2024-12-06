@@ -251,17 +251,23 @@ defmodule Livescript.TCP do
 
   defp handle_command(%{"command" => "parse_code", "code" => code, "mode" => mode}) do
     with {:parse, {:ok, exprs}} <- {:parse, Livescript.parse_code(code)},
-         %{executed_exprs: executed_exprs, executing_exprs: executing_exprs} <-
-           Livescript.get_state() do
+         %{
+           executed_exprs: executed_exprs,
+           current_expr_running: current_expr_running,
+           pending_execution: pending_execution
+         } <- Livescript.get_state() do
       exprs =
         exprs
         |> Enum.map(fn expr ->
           status =
             cond do
-              Enum.any?(executing_exprs, fn executing_expr ->
-                executing_expr.quoted == expr.quoted
-              end) ->
+              current_expr_running != nil and expr.quoted == current_expr_running.quoted ->
                 "executing"
+
+              Enum.any?(pending_execution, fn {pending_expr, _} ->
+                pending_expr.quoted == expr.quoted
+              end) ->
+                "pending"
 
               Enum.any?(executed_exprs, fn executed_expr ->
                 executed_expr.quoted == expr.quoted
@@ -269,7 +275,7 @@ defmodule Livescript.TCP do
                 "executed"
 
               true ->
-                "pending"
+                "new"
             end
 
           %{
@@ -292,7 +298,12 @@ defmodule Livescript.TCP do
                     expr: prev.expr <> "\n" <> expr.expr,
                     line_start: prev.line_start,
                     line_end: expr.line_end,
-                    status: prev.status
+                    status: case {prev.status, expr.status} do
+                      {_, "executing"} -> "executing"
+                      {"executing", _} -> "executing"
+                      {_, "pending"} -> "pending"
+                      _ -> prev.status
+                    end
                   }
 
                   [merged | rest]

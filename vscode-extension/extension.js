@@ -347,6 +347,12 @@ class LiveScriptCodeLensProvider {
 							this.codeLenses.push(new vscode.CodeLens(range, {
 								title: title,
 							}));
+						} else if (expr.status === 'pending') {
+							const title = 'Queued...';
+
+							this.codeLenses.push(new vscode.CodeLens(range, {
+								title: title,
+							}));
 						} else {
 							const triangle = expr.status === 'executed' ? '▶️' : '▷';
 							const title = executionMode === 'block' ?
