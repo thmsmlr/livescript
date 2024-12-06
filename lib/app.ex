@@ -6,6 +6,7 @@ defmodule Livescript.App do
 
     children = [
       {Task.Supervisor, name: Livescript.TaskSupervisor},
+      {Livescript.Broadcast, []},
       {Livescript.Executor, []},
       {Livescript, qualified_script_path},
       {Task, fn -> Livescript.TCP.server() end}

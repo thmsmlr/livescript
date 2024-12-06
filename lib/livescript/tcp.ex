@@ -1,6 +1,9 @@
 defmodule Livescript.TCP do
   require Logger
 
+  # 15 seconds in milliseconds
+  @heartbeat_timeout 15_000
+
   def server() do
     file_path = :sys.get_state(Livescript).file_path
     port = find_available_port(13137..13237)
@@ -52,23 +55,133 @@ defmodule Livescript.TCP do
 
   defp handle_client(socket) do
     with {:ok, data} <- receive_complete_message(socket, ""),
-         {:ok, decoded} <- try_json_decode(data),
-         {:ok, result} <- handle_command(decoded),
-         {:ok, encoded_response} <- try_json_encode(result) do
-      :gen_tcp.send(socket, "{\"success\": true, \"result\": #{encoded_response}}")
+         {:ok, decoded} <- try_json_decode(data) do
+      case decoded do
+        %{"command" => "establish_persistent"} ->
+          handle_persistent_connection(socket)
+      end
     else
       {:error, error} ->
-        encoded_error =
-          try do
-            :json.encode(error)
-          rescue
-            _ -> :json.encode(%{type: "internal_error", details: inspect(error)})
+        send_error_response(socket, error)
+        :gen_tcp.close(socket)
+    end
+  end
+
+  defp handle_persistent_connection(socket) do
+    Logger.info("Establishing persistent connection")
+
+    # Switch to active mode for persistent connections
+    :ok = :gen_tcp.send(socket, encode_response(%{type: "connection_established"}))
+    :ok = :inet.setopts(socket, active: true)
+
+    # Start heartbeat monitor
+    main_pid = self()
+    monitor_pid = spawn_link(fn -> monitor_heartbeat(socket, main_pid) end)
+
+    Livescript.Broadcast.subscribe(main_pid)
+
+    # Handle incoming messages in active mode
+    persistent_connection_loop(socket, monitor_pid)
+  end
+
+  defp persistent_connection_loop(socket, monitor_pid) do
+    receive do
+      {:tcp, ^socket, data} ->
+        Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+          handle_persistent_message(socket, data, monitor_pid)
+        end)
+
+        persistent_connection_loop(socket, monitor_pid)
+
+      {:tcp_closed, ^socket} ->
+        Logger.info("Persistent connection closed by client")
+        Process.exit(monitor_pid, :normal)
+        :ok
+
+      {:tcp_error, ^socket, reason} ->
+        Logger.error("Persistent connection error: #{inspect(reason)}")
+        Process.exit(monitor_pid, :normal)
+        :gen_tcp.close(socket)
+        :ok
+
+      {:heartbeat_timeout} ->
+        Logger.warning("Heartbeat timeout - closing connection")
+        Process.exit(monitor_pid, :normal)
+        :gen_tcp.close(socket)
+        :ok
+
+      {:broadcast, event} ->
+        :gen_tcp.send(socket, encode_response(%{type: event.type, timestamp: event.timestamp}))
+        persistent_connection_loop(socket, monitor_pid)
+    end
+  end
+
+  defp handle_persistent_message(socket, data, monitor_pid) do
+    with {:ok, decoded} <- try_json_decode(String.trim(data)) do
+      case decoded do
+        %{"command" => "heartbeat"} ->
+          send(monitor_pid, {:heartbeat_received})
+          :ok
+
+        %{"ref" => ref} = command ->
+          with {:ok, result} <- handle_command(command) do
+            :gen_tcp.send(socket, encode_response(%{success: true, result: result, ref: ref}))
+            :ok
+          else
+            {:error, error} ->
+              :gen_tcp.send(socket, encode_response(%{success: false, error: error, ref: ref}))
+              :ok
           end
 
-        :gen_tcp.send(socket, "{\"success\": false, \"error\": #{encoded_error}}")
-    end
+        _ ->
+          :ok
+      end
+    else
+      {:error, error} ->
+        # Include ref in error response if it was in the request
+        error_response =
+          case try_json_decode(String.trim(data)) do
+            {:ok, %{"ref" => ref}} ->
+              %{success: false, error: error, ref: ref}
 
-    :gen_tcp.close(socket)
+            _ ->
+              %{success: false, error: error}
+          end
+
+        :gen_tcp.send(socket, encode_response(error_response))
+        :ok
+    end
+  end
+
+  defp monitor_heartbeat(socket, main_pid) do
+    receive do
+      {:heartbeat_received} ->
+        monitor_heartbeat(socket, main_pid)
+    after
+      @heartbeat_timeout ->
+        send(main_pid, {:heartbeat_timeout})
+    end
+  end
+
+  defp send_error_response(socket, error) do
+    encoded_error =
+      try do
+        case try_json_encode(error) do
+          {:ok, encoded} -> encoded
+          {:error, _} -> :json.encode(%{type: "internal_error", details: inspect(error)})
+        end
+      rescue
+        _ -> :json.encode(%{type: "internal_error", details: inspect(error)})
+      end
+
+    :gen_tcp.send(socket, "{\"success\": false, \"error\": #{encoded_error}}\n")
+  end
+
+  defp encode_response(data) do
+    case try_json_encode(data) do
+      {:ok, encoded} -> encoded <> "\n"
+      {:error, _} -> "{\"error\": \"encoding_failed\"}\n"
+    end
   end
 
   # Recursively receive data until we get a complete message ending in newline
@@ -101,7 +214,7 @@ defmodule Livescript.TCP do
 
   defp try_json_encode(data) do
     try do
-      {:ok, data |> :json.encode()}
+      {:ok, data |> :json.encode() |> :erlang.iolist_to_binary()}
     rescue
       error -> {:error, "Unable to encode JSON: #{inspect(error)} on data: #{inspect(data)}"}
     end
@@ -138,18 +251,32 @@ defmodule Livescript.TCP do
 
   defp handle_command(%{"command" => "parse_code", "code" => code, "mode" => mode}) do
     with {:parse, {:ok, exprs}} <- {:parse, Livescript.parse_code(code)},
-         %{executed_exprs: executed_exprs} <- Livescript.get_state() do
+         %{executed_exprs: executed_exprs, executing_exprs: executing_exprs} <-
+           Livescript.get_state() do
       exprs =
         exprs
         |> Enum.map(fn expr ->
+          status =
+            cond do
+              Enum.any?(executing_exprs, fn executing_expr ->
+                executing_expr.quoted == expr.quoted
+              end) ->
+                "executing"
+
+              Enum.any?(executed_exprs, fn executed_expr ->
+                executed_expr.quoted == expr.quoted
+              end) ->
+                "executed"
+
+              true ->
+                "pending"
+            end
+
           %{
             expr: expr.code,
             line_start: expr.line_start,
             line_end: expr.line_end,
-            executed:
-              Enum.any?(executed_exprs, fn executed_expr ->
-                executed_expr.quoted == expr.quoted
-              end)
+            status: status
           }
         end)
 
@@ -165,7 +292,7 @@ defmodule Livescript.TCP do
                     expr: prev.expr <> "\n" <> expr.expr,
                     line_start: prev.line_start,
                     line_end: expr.line_end,
-                    executed: prev.executed or expr.executed
+                    status: prev.status
                   }
 
                   [merged | rest]
@@ -192,6 +319,10 @@ defmodule Livescript.TCP do
            details: inspect(error)
          }}
     end
+  end
+
+  defp handle_command(%{"command" => "ping"}) do
+    {:ok, %{type: "pong", timestamp: :os.system_time(:millisecond)}}
   end
 
   defp handle_command(command) do

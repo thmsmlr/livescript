@@ -32,12 +32,12 @@ defmodule Livescript do
       Task.async(fn -> Livescript.run_after_cursor(27) end)
   """
   def run_after_cursor(code, line_number) when is_integer(line_number) and is_binary(code) do
-    GenServer.call(__MODULE__, {:run_after_cursor, code, line_number})
+    GenServer.call(__MODULE__, {:run_after_cursor, code, line_number}, :infinity)
   end
 
   def run_at_cursor(code, line_number, line_end)
       when is_integer(line_number) and is_integer(line_end) and is_binary(code) do
-    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end})
+    GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end}, :infinity)
   end
 
   def get_state do
@@ -49,7 +49,14 @@ defmodule Livescript do
   def init(%{file_path: file_path} = state) do
     IO.puts(IO.ANSI.yellow() <> "Watching #{file_path} for changes..." <> IO.ANSI.reset())
     schedule_poll()
-    state = Map.merge(state, %{executed_exprs: [], last_modified: nil})
+
+    state =
+      Map.merge(state, %{
+        executing_exprs: [],
+        executed_exprs: [],
+        last_modified: nil
+      })
+
     {:ok, state}
   end
 
@@ -70,12 +77,16 @@ defmodule Livescript do
       IO.puts(IO.ANSI.yellow() <> "Running code after line #{line_number}:" <> IO.ANSI.reset())
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        broadcast_event(:executing, %{
+          exprs: exprs_after
+        })
+
         Livescript.Executor.execute(exprs_after)
         GenServer.reply(from, :ok)
         {:done_executing, state.executed_exprs}
       end)
 
-      {:noreply, state}
+      {:noreply, %{state | executing_exprs: exprs_after}}
     else
       error ->
         {:reply, error, state}
@@ -109,12 +120,16 @@ defmodule Livescript do
       IO.puts(IO.ANSI.yellow() <> "Running code at #{range_str}:" <> IO.ANSI.reset())
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        broadcast_event(:executing, %{
+          exprs: exprs_at
+        })
+
         Livescript.Executor.execute(exprs_at)
         GenServer.reply(from, :ok)
         {:done_executing, state.executed_exprs}
       end)
 
-      {:noreply, state}
+      {:noreply, %{state | executing_exprs: exprs_at}}
     else
       error ->
         {:reply, error, state}
@@ -165,11 +180,15 @@ defmodule Livescript do
         end
 
       Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+        broadcast_event(:executing, %{
+          exprs: rest_next_exprs
+        })
+
         executed_exprs = Livescript.Executor.execute(rest_next_exprs)
         {:done_executing, common_exprs ++ executed_exprs, mtime}
       end)
 
-      {:noreply, %{state | last_modified: mtime}}
+      {:noreply, %{state | last_modified: mtime, executing_exprs: rest_next_exprs}}
     else
       {:modified, false} ->
         {:noreply, state}
@@ -200,12 +219,23 @@ defmodule Livescript do
 
   @impl true
   def handle_info({_ref, {:done_executing, exprs}}, state) do
-    {:noreply, %{state | executed_exprs: exprs}}
+    broadcast_event(:done_executing, %{
+      executed_exprs: exprs,
+      last_modified: state.last_modified
+    })
+
+    {:noreply, %{state | executed_exprs: exprs, executing_exprs: []}}
   end
 
   @impl true
   def handle_info({_ref, {:done_executing, exprs, last_modified}}, state) do
-    {:noreply, %{state | executed_exprs: exprs, last_modified: last_modified}}
+    broadcast_event(:done_executing, %{
+      executed_exprs: exprs,
+      last_modified: last_modified
+    })
+
+    {:noreply,
+     %{state | executed_exprs: exprs, executing_exprs: [], last_modified: last_modified}}
   end
 
   def handle_info({:DOWN, _ref, _, _, :normal}, state) do
@@ -284,6 +314,14 @@ defmodule Livescript do
 
       {:ok, exprs}
     end
+  end
+
+  defp broadcast_event(type, payload) do
+    Livescript.Broadcast.broadcast(%{
+      type: type,
+      payload: payload,
+      timestamp: :os.system_time(:millisecond)
+    })
   end
 
   defp string_to_quoted_expressions(code, opts \\ []) do
