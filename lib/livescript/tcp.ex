@@ -47,24 +47,12 @@ defmodule Livescript.TCP do
     {:ok, client} = :gen_tcp.accept(socket)
 
     {:ok, pid} =
-      Task.Supervisor.start_child(Livescript.TaskSupervisor, fn -> handle_client(client) end)
+      Task.Supervisor.start_child(Livescript.TaskSupervisor, fn ->
+        handle_persistent_connection(client)
+      end)
 
     :gen_tcp.controlling_process(client, pid)
     accept_connections(socket)
-  end
-
-  defp handle_client(socket) do
-    with {:ok, data} <- receive_complete_message(socket, ""),
-         {:ok, decoded} <- try_json_decode(data) do
-      case decoded do
-        %{"command" => "establish_persistent"} ->
-          handle_persistent_connection(socket)
-      end
-    else
-      {:error, error} ->
-        send_error_response(socket, error)
-        :gen_tcp.close(socket)
-    end
   end
 
   defp handle_persistent_connection(socket) do
@@ -84,13 +72,22 @@ defmodule Livescript.TCP do
     persistent_connection_loop(socket, monitor_pid)
   end
 
-  defp persistent_connection_loop(socket, monitor_pid) do
+  defp persistent_connection_loop(socket, monitor_pid, acc \\ "") do
     receive do
       {:tcp, ^socket, data} ->
-        Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
-          handle_persistent_message(socket, data, monitor_pid)
-        end)
+        new_acc = acc <> data
 
+        if String.ends_with?(new_acc, "\n") do
+          Task.Supervisor.async_nolink(Livescript.TaskSupervisor, fn ->
+            handle_persistent_message(socket, new_acc, monitor_pid)
+          end)
+
+          persistent_connection_loop(socket, monitor_pid)
+        else
+          persistent_connection_loop(socket, monitor_pid, new_acc)
+        end
+
+      {:tcp_closed, ^socket} ->
         persistent_connection_loop(socket, monitor_pid)
 
       {:tcp_closed, ^socket} ->
@@ -163,44 +160,10 @@ defmodule Livescript.TCP do
     end
   end
 
-  defp send_error_response(socket, error) do
-    encoded_error =
-      try do
-        case try_json_encode(error) do
-          {:ok, encoded} -> encoded
-          {:error, _} -> :json.encode(%{type: "internal_error", details: inspect(error)})
-        end
-      rescue
-        _ -> :json.encode(%{type: "internal_error", details: inspect(error)})
-      end
-
-    :gen_tcp.send(socket, "{\"success\": false, \"error\": #{encoded_error}}\n")
-  end
-
   defp encode_response(data) do
     case try_json_encode(data) do
       {:ok, encoded} -> encoded <> "\n"
       {:error, _} -> "{\"error\": \"encoding_failed\"}\n"
-    end
-  end
-
-  # Recursively receive data until we get a complete message ending in newline
-  defp receive_complete_message(socket, acc) do
-    case :gen_tcp.recv(socket, 0) do
-      {:ok, data} ->
-        new_acc = acc <> data
-
-        if String.ends_with?(new_acc, "\n") do
-          {:ok, String.trim(new_acc)}
-        else
-          receive_complete_message(socket, new_acc)
-        end
-
-      {:error, :closed} ->
-        {:ok, acc}
-
-      {:error, reason} ->
-        {:error, "Error receiving data: #{inspect(reason)}"}
     end
   end
 
@@ -298,12 +261,13 @@ defmodule Livescript.TCP do
                     expr: prev.expr <> "\n" <> expr.expr,
                     line_start: prev.line_start,
                     line_end: expr.line_end,
-                    status: case {prev.status, expr.status} do
-                      {_, "executing"} -> "executing"
-                      {"executing", _} -> "executing"
-                      {_, "pending"} -> "pending"
-                      _ -> prev.status
-                    end
+                    status:
+                      case {prev.status, expr.status} do
+                        {_, "executing"} -> "executing"
+                        {"executing", _} -> "executing"
+                        {_, "pending"} -> "pending"
+                        _ -> prev.status
+                      end
                   }
 
                   [merged | rest]

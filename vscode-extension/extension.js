@@ -539,16 +539,10 @@ function activate(context) {
 			let connected = false;
 			for (let i = 0; i < 5; i++) { // Try 5 times
 				await new Promise(resolve => setTimeout(resolve, 1000));
-				try {
-					await global.livescriptConnection.connect(filepath);
-					const isConnected = await codeLensProvider.verifyServerConnection(filepath);
-					if (isConnected) {
-						connected = true;
-						break;
-					}
-				} catch (err) {
-					console.log('Connection attempt failed:', err);
-					// Continue to next attempt
+				const isConnected = await codeLensProvider.verifyServerConnection(filepath);
+				if (isConnected) {
+					connected = true;
+					break;
 				}
 			}
 
