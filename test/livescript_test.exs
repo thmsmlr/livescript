@@ -231,5 +231,43 @@ defmodule LivescriptTest do
       update_script(script_path, "#{call_home_with(:ok)}")
       assert :ok = get_return_value()
     end
+
+    test "can handle a compile error", %{script_path: script_path} do
+      update_script(script_path, """
+      a = 1
+      #{call_home_with(:ok)}
+      """)
+
+      assert :ok = get_return_value()
+
+      Livescript.run_at_cursor(
+        """
+        a = 1
+        for i <- b do
+          i
+        end
+        """,
+        1,
+        3
+      )
+
+      update_script(script_path, """
+      a = 1
+      b = 2
+      #{call_home_with(quote do: a + b)}
+      """)
+
+      assert 3 = get_return_value()
+    end
+
+    test "correctly handles imports", %{script_path: script_path} do
+      update_script(script_path, """
+      import Enum
+      x = map([1, 2, 3], fn x -> x * 2 end)
+      #{call_home_with(quote do: x)}
+      """)
+
+      assert [2, 4, 6] = get_return_value()
+    end
   end
 end

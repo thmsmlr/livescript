@@ -27,83 +27,46 @@ defmodule Livescript.Executor do
 
   # Helper functions moved from Livescript module
 
-  def execute_code(exprs, opts \\ []) do
+  def execute_code(exprs, opts) do
+    ignore_last_expression = Keyword.get(opts, :ignore_last_expression, false)
     num_exprs = length(exprs)
 
     exprs
     |> Enum.with_index()
     |> Enum.take_while(fn {%Livescript.Expression{} = expr, index} ->
       is_last = index == num_exprs - 1
-
-      code_str = expr.code
       start_line = expr.line_start
 
-      code =
-        case expr.quoted do
-          {:use, _, _} ->
-            code_str
-
-          {:require, _, _} ->
-            code_str
-
-          {:import, _, _} ->
-            code_str
-
-          {:alias, _, _} ->
-            code_str
-
-          {_, _, _} ->
-            """
-            {livescript_result__, livescript_binding__} = try do: (livescript_result__ = (#{code_str})
-              livescript_binding__ = binding() |> Keyword.filter(fn {k, _} -> k not in [:livescript_binding__, :livescript_result__] end)
-              {livescript_result__, livescript_binding__}
-            ), rescue: (
-              e ->
-                #{Macro.to_string(call_home_macro(:error))}
-                reraise e, __STACKTRACE__
-            )
-            """
-        end
-
-      do_execute_code(code,
+      do_execute_code("livescript_result__ = (#{expr.code})",
         start_line: start_line,
         async: true,
-        call_home_with: :complete
+        call_home_with: :success,
+        print_result:
+          if(is_last and not ignore_last_expression,
+            do: "livescript_result__",
+            else: "IEx.dont_display_result()"
+          )
       )
 
+      do_execute_code("", async: true, call_home_with: :complete)
+
+      # If the status is :success, we need to wait for the :complete message
+      # to keep the mailbox clean. Otherwise, there was some kind of error
       was_successful =
         receive do
-          {:__livescript__, :complete} -> true
-          {:__livescript__, :error} -> false
+          {:__livescript__, :success} ->
+            receive do: ({:__livescript__, :complete} -> true)
+
+          {:__livescript__, :complete} ->
+            false
         end
 
-      if was_successful do
-        # Fetch the bindings from the try scope
-        do_execute_code(call_home_macro(quote do: Keyword.keys(livescript_binding__)))
-        binding_keys = receive do: ({:__livescript__, x} -> x)
-
-        # Set them into the parent scope
-        binding_keys
-        |> Enum.each(fn k ->
-          kvar = Macro.var(k, nil)
-          do_execute_code(quote do: unquote(kvar) = livescript_binding__[unquote(k)])
-        end)
-
-        ignore_last_expression = Keyword.get(opts, :ignore_last_expression, false)
-
-        if is_last and not ignore_last_expression do
-          do_execute_code("", print_result: "livescript_result__")
-        end
-
-        true
-      else
-        false
-      end
+      was_successful
     end)
     |> Enum.map(fn {expr, _} -> expr end)
   end
 
-  defp do_execute_code(code, opts \\ [])
+  defp do_execute_code(code, opts)
 
   defp do_execute_code(code, opts) when is_binary(code) do
     {iex_evaluator, iex_server} = find_iex()

@@ -18,6 +18,8 @@
             "taskArgs": [
                 "--trace"
             ],
+            "debugAutoInterpretAllModules": false,
+            "debugInterpretModulesPatterns": ["Livescript.*"],
             "startApps": true,
             "projectDir": "${workspaceRoot}",
             "requireFiles": [
