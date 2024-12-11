@@ -77,7 +77,6 @@ defmodule LivescriptTest do
       iex_server =
         spawn_link(fn ->
           IEx.Server.run([])
-          Process.sleep(:infinity)
         end)
 
       on_exit(fn ->
@@ -90,11 +89,13 @@ defmodule LivescriptTest do
       %{script_path: script_path}
     end
 
-    defp call_home_with(val) do
+    defp call_home_with(val, opts \\ []) do
+      prefix = Keyword.get(opts, :prefix, :__livescript_test_return)
+
       quote do
         send(
           :erlang.list_to_pid(unquote(:erlang.pid_to_list(self()))),
-          {:__livescript_test_return, unquote(val)}
+          {unquote(prefix), unquote(val)}
         )
       end
       |> Macro.to_string()
@@ -109,18 +110,22 @@ defmodule LivescriptTest do
     end
 
     defp update_script(script_path, code) do
-      mtime = File.stat!(script_path).mtime
+      %{last_modified: mtime} = Livescript.get_state()
+      {date, {hour, minute, second}} = mtime
+      mtime = {date, {hour, minute, second + 1}}
+
       File.write!(script_path, code)
-      wait_for_change(script_path, mtime)
-    end
+      GenServer.whereis(Livescript) |> send({:file_changed, code, mtime})
 
-    defp wait_for_change(path, mtime) do
-      new_mtime = File.stat!(path).mtime
+      Livescript.execute_code("""
+      #{call_home_with(:updated, prefix: :__livescript_script_updated)}
+      IEx.dont_display_result()
+      """)
 
-      if new_mtime == mtime do
-        File.touch!(path)
-        Process.sleep(30)
-        wait_for_change(path, mtime)
+      receive do
+        {:__livescript_script_updated, :updated} -> :ok
+      after
+        5000 -> raise "Timeout waiting for updated script to be acknowledged"
       end
     end
 
@@ -243,7 +248,8 @@ defmodule LivescriptTest do
       Livescript.run_at_cursor(
         """
         a = 1
-        for i <- b do
+        b = 2
+        for i <- foobar do
           i
         end
         """,

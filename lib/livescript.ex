@@ -40,6 +40,12 @@ defmodule Livescript do
     GenServer.call(__MODULE__, {:run_at_cursor, code, line_number, line_end}, :infinity)
   end
 
+  def execute_code(code) when is_binary(code) do
+    line_number = 1
+    line_end = (String.split(code, "\n") |> length()) - 1
+    run_at_cursor(code, line_number, line_end)
+  end
+
   def get_state do
     GenServer.call(__MODULE__, :get_state)
   end
@@ -48,7 +54,7 @@ defmodule Livescript do
   @impl true
   def init(%{file_path: file_path} = state) do
     IO.puts(IO.ANSI.yellow() <> "Watching #{file_path} for changes..." <> IO.ANSI.reset())
-    schedule_poll()
+    send(self(), :poll)
 
     state =
       Map.merge(state, %{
@@ -122,13 +128,8 @@ defmodule Livescript do
   end
 
   @impl true
-  def handle_info(:poll, %{file_path: file_path} = state) do
-    mtime = File.stat!(file_path).mtime
-
-    with {:modified, true} <-
-           {:modified, state.last_modified == nil || mtime > state.last_modified},
-         {:read_file, {:ok, next_code}} <- {:read_file, File.read(file_path)},
-         {:parse_code, {:ok, next_exprs}} <- {:parse_code, parse_code(next_code)} do
+  def handle_info({:file_changed, next_code, mtime}, %{file_path: file_path} = state) do
+    with {:parse_code, {:ok, next_exprs}} <- {:parse_code, parse_code(next_code)} do
       # Print modification message (except for first run)
       if state.last_modified != nil do
         [_, current_time] =
@@ -145,40 +146,25 @@ defmodule Livescript do
       end
 
       # For first run, execute preamble
-      if state.last_modified == nil do
-        preamble_code(file_path)
-        |> Livescript.Executor.execute()
-      end
-
-      # Calculate which expressions to run
-      {common_exprs, rest_next_exprs} =
+      state =
         if state.last_modified == nil do
-          {[], next_exprs}
+          enqueue_execution(preamble_code(file_path), state, ignore: true)
         else
-          {common, _rest_exprs, _rest_next} =
-            split_at_diff(
-              Enum.map(state.executed_exprs, & &1.quoted),
-              Enum.map(next_exprs, & &1.quoted)
-            )
-
-          {Enum.take(next_exprs, length(common)), Enum.drop(next_exprs, length(common))}
+          state
         end
 
+      {common_exprs, _rest_exprs, _rest_next} =
+        split_at_diff(
+          Enum.map(state.executed_exprs, & &1.quoted),
+          Enum.map(next_exprs, & &1.quoted)
+        )
+
+      common_exprs = Enum.take(next_exprs, length(common_exprs))
+      rest_next_exprs = Enum.drop(next_exprs, length(common_exprs))
       state = enqueue_execution(rest_next_exprs, state, ignore: false)
 
       {:noreply, %{state | executed_exprs: common_exprs, last_modified: mtime}}
     else
-      {:modified, false} ->
-        {:noreply, state}
-
-      {:read_file, {:error, err}} ->
-        IO.puts(
-          IO.ANSI.red() <>
-            "Failed to process file: #{inspect(err)}" <> IO.ANSI.reset()
-        )
-
-        {:noreply, %{state | last_modified: mtime}}
-
       {:parse_code, {:error, reason}} ->
         IO.puts(
           IO.ANSI.red() <>
@@ -187,12 +173,19 @@ defmodule Livescript do
 
         {:noreply, %{state | last_modified: mtime}}
     end
-  catch
-    e ->
-      IO.puts(IO.ANSI.red() <> "Error: #{inspect(e)}" <> IO.ANSI.reset())
-      {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:poll, %{file_path: file_path} = state) do
+    mtime = File.stat!(file_path).mtime
+
+    if state.last_modified == nil || mtime > state.last_modified do
+      send(self(), {:file_changed, File.read!(file_path), mtime})
+    end
+
+    {:noreply, %{state | last_modified: mtime}}
   after
-    schedule_poll()
+    Process.send_after(self(), :poll, @poll_interval)
   end
 
   @impl true
@@ -364,8 +357,4 @@ defmodule Livescript do
   end
 
   defp line_range(_), do: {:infinity, 0}
-
-  defp schedule_poll do
-    Process.send_after(self(), :poll, @poll_interval)
-  end
 end
